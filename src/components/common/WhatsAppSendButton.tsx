@@ -82,18 +82,12 @@ export const WhatsAppSendButton: React.FC<WhatsAppSendButtonProps> = ({
     };
   }, [canSend, payload.invoiceId, payload.documentNumber]);
 
-  // Optional auto-trigger when autoTriggerKey changes (for Auto-send on save)
+  // Manual send only: never auto-trigger WhatsApp on save/update/modify
   useEffect(() => {
-    if (
-      autoTriggerKey &&
-      autoTriggerKey !== autoTriggeredRef &&
-      canSend &&
-      payload.documentNumber
-    ) {
+    if (autoTriggerKey && autoTriggerKey !== autoTriggeredRef) {
       setAutoTriggeredRef(autoTriggerKey);
-      handleInitiateSend('phase1', true);
     }
-  }, [autoTriggerKey]);
+  }, [autoTriggerKey, autoTriggeredRef]);
 
   if (!canSend) return null;
 

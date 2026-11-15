@@ -4,6 +4,12 @@ import { Item, ItemFormData } from '../../types/item';
 import { api } from '../../services/api';
 import { NumericInput } from '../common/NumericInput';
 import { ItemCompanySelect } from './ItemCompanySelect';
+import {
+  calculateItemPricingFromPurchase,
+  calculateLooseRateFromRetail,
+  calculatePricesFromTradePrice,
+  parsePackingUnits,
+} from '../../utils/itemPricing';
 
 interface ItemFormModalProps {
   isOpen: boolean;
@@ -58,6 +64,9 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
   };
 
   const [formData, setFormData] = useState<ItemFormData>(initialForm);
+  const [tradeTouched, setTradeTouched] = useState<boolean>(false);
+  const [wholesaleTouched, setWholesaleTouched] = useState<boolean>(false);
+  const [retailTouched, setRetailTouched] = useState<boolean>(false);
   const [looseRateTouched, setLooseRateTouched] = useState<boolean>(false);
   const [codeChecking, setCodeChecking] = useState<boolean>(false);
   const [loadingAutoCode, setLoadingAutoCode] = useState<boolean>(false);
@@ -65,32 +74,14 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
   const [saving, setSaving] = useState<boolean>(false);
   const [formError, setFormError] = useState<string | null>(null);
 
-  // Helper to parse units from packing string (e.g. "10x10" -> 100, "20x5" -> 100, "1x1" -> 1, "30" -> 30)
-  const parsePackingUnits = (packStr: string): number => {
-    if (!packStr) return 1;
-    const parts = packStr
-      .toLowerCase()
-      .split('x')
-      .map((p) => parseFloat(p.trim()))
-      .filter((n) => !isNaN(n) && n > 0);
-    if (parts.length === 2) {
-      return parts[0] * parts[1];
-    }
-    if (parts.length === 1) {
-      return parts[0];
-    }
-    return 1;
-  };
-
   useEffect(() => {
     if (!isOpen) return;
     let cancelled = false;
     if (editingItem) {
-      const units = parsePackingUnits(editingItem.packing);
       const savedLoose =
         editingItem.loose_rate !== undefined && Number(editingItem.loose_rate) > 0
           ? Number(editingItem.loose_rate)
-          : Math.round(((editingItem.retail_price || 0) / Math.max(1, units) + Number.EPSILON) * 100) / 100;
+          : calculateLooseRateFromRetail(editingItem.retail_price || 0, editingItem.packing);
       setFormData({
         item_code: editingItem.item_code,
         company_name: editingItem.company_name,
@@ -111,11 +102,17 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
         rack_number: editingItem.rack_number || '',
         status: editingItem.status,
       });
+      setTradeTouched(true);
+      setWholesaleTouched(true);
+      setRetailTouched(true);
       setLooseRateTouched(true);
       setCodeError(null);
       setLoadingAutoCode(false);
     } else {
       setFormData(initialForm);
+      setTradeTouched(false);
+      setWholesaleTouched(false);
+      setRetailTouched(false);
       setLooseRateTouched(false);
       setCodeError(null);
       setLoadingAutoCode(true);
@@ -168,14 +165,13 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
   const packingUnits = parsePackingUnits(formData.packing);
   const calculatedLooseRetailPrice =
     packingUnits > 0 && formData.retail_price > 0
-      ? Math.round((formData.retail_price / packingUnits + Number.EPSILON) * 100) / 100
+      ? calculateLooseRateFromRetail(formData.retail_price, formData.packing)
       : formData.retail_price;
   const looseRetailPrice = looseRateTouched
     ? Number(formData.loose_rate || 0)
     : formData.loose_rate !== undefined && Number(formData.loose_rate) > 0
     ? Number(formData.loose_rate)
     : calculatedLooseRetailPrice;
-  const looseTradePrice = packingUnits > 0 && formData.trade_price > 0 ? formData.trade_price / packingUnits : formData.trade_price;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -397,7 +393,16 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                   type="text"
                   required
                   value={formData.packing}
-                  onChange={(e) => setFormData({ ...formData, packing: e.target.value })}
+                  onChange={(e) => {
+                    const nextPacking = e.target.value;
+                    setFormData((prev) => ({
+                      ...prev,
+                      packing: nextPacking,
+                      loose_rate: !looseRateTouched
+                        ? calculateLooseRateFromRetail(prev.retail_price, nextPacking)
+                        : prev.loose_rate,
+                    }));
+                  }}
                   placeholder="e.g. 10x10, 20x10, 1x1, 100"
                   className="w-full px-3 py-1.5 text-xs font-mono font-bold rounded-lg border border-emerald-300 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                 />
@@ -441,7 +446,22 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                   <span className="absolute left-2.5 top-1.5 text-[11px] text-slate-400 font-mono">Rs.</span>
                   <NumericInput
                     value={formData.purchase_price}
-                    onChange={(e) => setFormData({ ...formData, purchase_price: parseFloat(e.target.value) || 0 })}
+                    onChange={(e) => {
+                      const nextPurchase = Math.max(0, parseFloat(e.target.value) || 0);
+                      const calculated = calculateItemPricingFromPurchase(nextPurchase, formData.packing);
+                      setTradeTouched(false);
+                      setWholesaleTouched(false);
+                      setRetailTouched(false);
+                      setLooseRateTouched(false);
+                      setFormData((prev) => ({
+                        ...prev,
+                        purchase_price: nextPurchase,
+                        trade_price: calculated.tradePrice,
+                        wholesale_price: calculated.wholesalePrice,
+                        retail_price: calculated.retailPrice,
+                        loose_rate: calculated.looseRate,
+                      }));
+                    }}
                     className="w-full pl-8 pr-2 py-1.5 text-xs font-mono font-bold rounded-lg border border-slate-300 bg-slate-50 focus:bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                   />
                 </div>
@@ -456,8 +476,25 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                   <span className="absolute left-2.5 top-1.5 text-[11px] text-slate-400 font-mono">Rs.</span>
                   <NumericInput
                     value={formData.trade_price}
-                    onChange={(e) => setFormData({ ...formData, trade_price: parseFloat(e.target.value) || 0 })}
+                    onChange={(e) => {
+                      const nextTrade = Math.max(0, parseFloat(e.target.value) || 0);
+                      const fromTrade = calculatePricesFromTradePrice(nextTrade, formData.packing);
+                      setTradeTouched(true);
+                      setFormData((prev) => {
+                        const nextRetail = !retailTouched ? fromTrade.retailPrice : prev.retail_price;
+                        return {
+                          ...prev,
+                          trade_price: nextTrade,
+                          wholesale_price: !wholesaleTouched ? fromTrade.wholesalePrice : prev.wholesale_price,
+                          retail_price: nextRetail,
+                          loose_rate: !looseRateTouched
+                            ? calculateLooseRateFromRetail(nextRetail, prev.packing)
+                            : prev.loose_rate,
+                        };
+                      });
+                    }}
                     className="w-full pl-8 pr-2 py-1.5 text-xs font-mono font-bold rounded-lg border border-slate-300 bg-slate-50 focus:bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    title="Auto-calculated as Purchase Price / 0.85 (editable)"
                   />
                 </div>
               </div>
@@ -471,7 +508,13 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                   <span className="absolute left-2.5 top-1.5 text-[11px] text-slate-400 font-mono">Rs.</span>
                   <NumericInput
                     value={formData.wholesale_price}
-                    onChange={(e) => setFormData({ ...formData, wholesale_price: parseFloat(e.target.value) || 0 })}
+                    onChange={(e) => {
+                      setWholesaleTouched(true);
+                      setFormData((prev) => ({
+                        ...prev,
+                        wholesale_price: Math.max(0, parseFloat(e.target.value) || 0),
+                      }));
+                    }}
                     className="w-full pl-8 pr-2 py-1.5 text-xs font-mono font-bold rounded-lg border border-slate-300 bg-slate-50 focus:bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                   />
                 </div>
@@ -487,11 +530,15 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                   <NumericInput
                     value={formData.retail_price}
                     onChange={(e) => {
-                      const nextRetail = parseFloat(e.target.value) || 0;
-                      const nextLoose = !looseRateTouched
-                        ? Math.round((nextRetail / Math.max(1, packingUnits) + Number.EPSILON) * 100) / 100
-                        : formData.loose_rate;
-                      setFormData({ ...formData, retail_price: nextRetail, loose_rate: nextLoose });
+                      const nextRetail = Math.max(0, parseFloat(e.target.value) || 0);
+                      setRetailTouched(true);
+                      setFormData((prev) => ({
+                        ...prev,
+                        retail_price: nextRetail,
+                        loose_rate: !looseRateTouched
+                          ? calculateLooseRateFromRetail(nextRetail, prev.packing)
+                          : prev.loose_rate,
+                      }));
                     }}
                     className="w-full pl-8 pr-2 py-1.5 text-xs font-mono font-black rounded-lg border border-emerald-400 bg-emerald-50/30 focus:bg-white text-emerald-950 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                   />
@@ -509,7 +556,10 @@ export const ItemFormModal: React.FC<ItemFormModalProps> = ({
                     value={looseRateTouched ? formData.loose_rate : (formData.loose_rate ?? looseRetailPrice)}
                     onChange={(e) => {
                       setLooseRateTouched(true);
-                      setFormData({ ...formData, loose_rate: parseFloat(e.target.value) || 0 });
+                      setFormData((prev) => ({
+                        ...prev,
+                        loose_rate: Math.max(0, parseFloat(e.target.value) || 0),
+                      }));
                     }}
                     className="w-full pl-8 pr-2 py-1.5 text-xs font-mono font-black rounded-lg border border-blue-400 bg-blue-50/40 focus:bg-white text-blue-950 focus:outline-none focus:ring-1 focus:ring-blue-500"
                     title="Loose Rate per single unit/tablet (independent of Box MRP)"

@@ -64,6 +64,12 @@ import {
   InvoiceSearchableItem,
 } from '../common/InvoiceRecordSearchInput';
 import { generatePurchaseOrderSmsText } from '../../utils/invoiceSms';
+import {
+  calculateItemPricingFromPurchase,
+  calculateLooseRateFromRetail,
+  parsePackingUnits as parseUnitsPerPack,
+  round2,
+} from '../../utils/itemPricing';
 
 export type PurchaseSubTab =
   | 'new-invoice'
@@ -83,38 +89,12 @@ interface PurchasesWorkspaceViewProps {
 export const INITIAL_PURCHASE_ROWS = 15;
 const ACTIVE_PURCHASE_DRAFT_KEY = 'ams_active_purchase_draft_v2';
 
-const round2 = (n: number) => Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
-
-function parseUnitsPerPack(packing?: string): number {
-  const clean = (packing || '1x1').trim().toLowerCase();
-  const m = clean.match(/(\d+)\s*[xX*×]\s*(\d+)/);
-  if (m) {
-    return Math.max(1, (parseInt(m[1], 10) || 1) * (parseInt(m[2], 10) || 1));
-  }
-  const singleMatch = clean.match(
-    /(\d+)\s*(tab|cap|sachet|amp|vial|strip|pack|unit|pc|pill|softgel|lozenge|'s|s\b)/i
-  );
-  if (singleMatch) {
-    return Math.max(1, parseInt(singleMatch[1], 10) || 1);
-  }
-  if (!/ml|mg|gm|g\b|kg|l\b|oz|drop|syr|susp|cream|oint|gel|lotion|inj|inf/i.test(clean)) {
-    const s = clean.match(/^(\d+)$/);
-    if (s) return Math.max(1, parseInt(s[1], 10) || 1);
-  }
-  return 1;
-}
-
-// Retail = Purchase Price ÷ 0.85 (e.g. 102 -> 120.00, 89.3775 -> 105.15), kept to 2 decimals.
-// No rounding to 50/100: only normal rounding to 2 decimal places.
-const RETAIL_PRICE_DIVISOR = 0.85;
-
 function calculateRetailFromPurchasePrice(newPurchasePrice: number): {
   retailBase: number;
   roundedRetailPrice: number;
 } {
-  const p = Math.max(0, Number(newPurchasePrice) || 0);
-  const retailBase = p > 0 ? round2(p / RETAIL_PRICE_DIVISOR) : 0;
-  return { retailBase, roundedRetailPrice: retailBase };
+  const pricing = calculateItemPricingFromPurchase(newPurchasePrice, '1x1');
+  return { retailBase: pricing.retailPrice, roundedRetailPrice: pricing.retailPrice };
 }
 
 export const createBlankPurchaseLine = (): PurchaseLineItem => ({
@@ -294,6 +274,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const itemDropdownContainerRef = useRef<HTMLDivElement | null>(null);
   const supplierListRef = useRef<HTMLDivElement | null>(null);
   const itemListRef = useRef<HTMLDivElement | null>(null);
+  const priceDialogRef = useRef<HTMLDivElement | null>(null);
+  const priceDialogPurchaseInputRef = useRef<HTMLInputElement | null>(null);
+  const priceDialogRetailInputRef = useRef<HTMLInputElement | null>(null);
+  const priceDialogLooseInputRef = useRef<HTMLInputElement | null>(null);
+  const lastPromptedRateByRowRef = useRef<Record<number, number>>({});
+  const isPricePromptOpenRef = useRef<boolean>(false);
 
   // Supplier Search Dropdown State
   const [supplierSearchQuery, setSupplierSearchQuery] = useState<string>('');
@@ -889,7 +875,46 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     }
   };
 
-  // Select Supplier & automatically focus Item Search
+  // Focus Item Search field inside a NEW empty invoice row (used after selecting Supplier + pressing Enter)
+  const focusNewEmptyPurchaseRowItemSearch = () => {
+    const firstEmptyIdx = lines.findIndex((l) => !isPurchaseLinePopulated(l));
+    const targetRowIdx = firstEmptyIdx >= 0 ? firstEmptyIdx : lines.length;
+    if (targetRowIdx >= lines.length) {
+      setLines((prev) =>
+        ensureMinimumPurchaseRows(
+          [...prev, createBlankPurchaseLine()],
+          visibleRowCapacityRef.current,
+          targetRowIdx
+        )
+      );
+    }
+    setSelectedPurchaseLineIndex(targetRowIdx);
+    setPurchaseRecordJumpInput(String(targetRowIdx + 1));
+    setActiveRowItemSearchIdx(null);
+    setActiveRowItemSearchField(null);
+    setRowItemSearchQuery('');
+    setShowPurchaseSearchDropdown(false);
+
+    const prefix: 'pur_cell' | 'pos_row' =
+      purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell';
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        const el = document.getElementById(
+          `${prefix}_${targetRowIdx}_item_name`
+        ) as HTMLInputElement | null;
+        if (el) {
+          el.focus();
+          el.select?.();
+          el.closest('tr')?.scrollIntoView({ block: 'nearest' });
+        } else {
+          itemSearchInputRef.current?.focus();
+          itemSearchInputRef.current?.select?.();
+        }
+      }, 25);
+    });
+  };
+
+  // Select Supplier & automatically focus Item Search in a new empty invoice row
   const handleSelectSupplierFromDropdown = (sup: Account) => {
     setSupplierId(String(sup.id));
     setSupplierFilerStatus(sup.filer_status || 'Filer');
@@ -897,10 +922,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setSupplierSearchQuery(`[${sup.account_code}] ${sup.account_name}${mobilePart}`);
     setIsSupplierDropdownOpen(false);
     setSupplierHighlightIndex(0);
-    setTimeout(() => {
-      itemSearchInputRef.current?.focus();
-      itemSearchInputRef.current?.select?.();
-    }, 25);
+    focusNewEmptyPurchaseRowItemSearch();
   };
 
   const handleSupplierSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -950,8 +972,11 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       }
       if (selectedSupplier) {
         setIsSupplierDropdownOpen(false);
-        itemSearchInputRef.current?.focus();
-        itemSearchInputRef.current?.select?.();
+        focusNewEmptyPurchaseRowItemSearch();
+        return;
+      }
+      if (filteredSuppliers.length > 0) {
+        handleSelectSupplierFromDropdown(filteredSuppliers[0]);
       }
       return;
     }
@@ -1160,9 +1185,33 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     newRetailPrice: number;
     oldLooseRate: number;
     newLooseRate: number;
+    looseRateManuallyEdited?: boolean;
     nextFocusTargetId?: string;
   } | null>(null);
   const [updatingItemMasterPrice] = useState(false);
+
+  useEffect(() => {
+    isPricePromptOpenRef.current = Boolean(priceChangePrompt);
+    if (!priceChangePrompt) return;
+    const rafId = window.requestAnimationFrame(() => {
+      setTimeout(() => {
+        if (priceChangePrompt.step === 'confirm_purchase') {
+          const input = priceDialogPurchaseInputRef.current;
+          if (input) {
+            input.focus();
+            input.select?.();
+          }
+        } else {
+          const input = priceDialogRetailInputRef.current;
+          if (input) {
+            input.focus();
+            input.select?.();
+          }
+        }
+      }, 20);
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, [priceChangePrompt?.step, Boolean(priceChangePrompt)]);
 
   const focusTargetElementById = (targetId?: string) => {
     if (!targetId) return;
@@ -1181,6 +1230,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     rowIdx: number,
     nextFocusTargetId?: string
   ): boolean => {
+    if (isPricePromptOpenRef.current || priceChangePrompt) return false;
     const row = lines[rowIdx];
     if (!row || !row.item_id || row.item_id <= 0) return false;
 
@@ -1196,12 +1246,17 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       return false;
     }
 
+    const syncLastPrompted = lastPromptedRateByRowRef.current[rowIdx];
     if (
-      row.last_prompted_purchase_rate !== undefined &&
-      Math.abs(row.last_prompted_purchase_rate - newPurchasePrice) < 0.01
+      (syncLastPrompted !== undefined && Math.abs(syncLastPrompted - newPurchasePrice) < 0.01) ||
+      (row.last_prompted_purchase_rate !== undefined &&
+        Math.abs(row.last_prompted_purchase_rate - newPurchasePrice) < 0.01)
     ) {
       return false;
     }
+
+    lastPromptedRateByRowRef.current[rowIdx] = newPurchasePrice;
+    isPricePromptOpenRef.current = true;
 
     setLines((prev) => {
       const next = [...prev];
@@ -1216,7 +1271,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
     const packingStr = masterItem?.packing || row.packing || '1x1';
     const unitsPerPack = Math.max(1, parseUnitsPerPack(packingStr));
-    const { retailBase, roundedRetailPrice } = calculateRetailFromPurchasePrice(newPurchasePrice);
+    const pricing = calculateItemPricingFromPurchase(newPurchasePrice, packingStr);
     const oldRetailPrice = round2(
       masterItem
         ? Number(masterItem.retail_price || 0)
@@ -1227,7 +1282,6 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         ? Number(masterItem.loose_rate)
         : oldRetailPrice / unitsPerPack
     );
-    const newLooseRate = round2(roundedRetailPrice / unitsPerPack);
 
     setPriceChangePrompt({
       step: 'confirm_purchase',
@@ -1240,11 +1294,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       unitsPerPack,
       oldPurchasePrice,
       newPurchasePrice,
-      retailBase,
+      retailBase: pricing.retailPrice,
       oldRetailPrice,
-      newRetailPrice: roundedRetailPrice,
+      newRetailPrice: pricing.retailPrice,
       oldLooseRate,
-      newLooseRate,
+      newLooseRate: pricing.looseRate,
+      looseRateManuallyEdited: false,
       nextFocusTargetId,
     });
 
@@ -1255,12 +1310,16 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const handleKeepOldPurchasePrice = () => {
     if (!priceChangePrompt) return;
     const prompt = priceChangePrompt;
+    const finalPurchaseRate = round2(prompt.newPurchasePrice);
+    lastPromptedRateByRowRef.current[prompt.rowIndex] = finalPurchaseRate;
+    isPricePromptOpenRef.current = false;
+    handleLineChange(prompt.rowIndex, 'purchase_rate', finalPurchaseRate);
     setLines((prev) => {
       const next = [...prev];
       if (next[prompt.rowIndex]) {
         next[prompt.rowIndex] = {
           ...next[prompt.rowIndex],
-          last_prompted_purchase_rate: prompt.newPurchasePrice,
+          last_prompted_purchase_rate: finalPurchaseRate,
           update_master_purchase_price: false,
           update_master_retail_price: false,
         };
@@ -1270,20 +1329,51 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setFormSuccess(
       `Kept old Item Master Purchase Price (Rs. ${prompt.oldPurchasePrice.toFixed(
         2
-      )}) for "${prompt.itemName}". New rate Rs. ${prompt.newPurchasePrice.toFixed(
+      )}) for "${prompt.itemName}". New rate Rs. ${finalPurchaseRate.toFixed(
         2
       )} saved in this purchase invoice only.`
     );
     setPriceChangePrompt(null);
-    focusTargetElementById(prompt.nextFocusTargetId);
+    const fallbackTargetId = `${purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell'}_${prompt.rowIndex}_purchase_rate`;
+    focusTargetElementById(prompt.nextFocusTargetId || fallbackTargetId);
+  };
+
+  const handleCancelPriceChangePrompt = () => {
+    if (!priceChangePrompt) return;
+    const prompt = priceChangePrompt;
+    const finalPurchaseRate = round2(prompt.newPurchasePrice);
+    lastPromptedRateByRowRef.current[prompt.rowIndex] = finalPurchaseRate;
+    isPricePromptOpenRef.current = false;
+    setLines((prev) => {
+      const next = [...prev];
+      if (next[prompt.rowIndex]) {
+        next[prompt.rowIndex] = {
+          ...next[prompt.rowIndex],
+          last_prompted_purchase_rate: finalPurchaseRate,
+          update_master_purchase_price: false,
+          update_master_retail_price: false,
+        };
+      }
+      return next;
+    });
+    setPriceChangePrompt(null);
+    const fallbackTargetId = `${purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell'}_${prompt.rowIndex}_purchase_rate`;
+    focusTargetElementById(prompt.nextFocusTargetId || fallbackTargetId);
   };
 
   // Step 1 YES – Update Purchase Price -> Proceed to Step 2 ("Do you also want to update Retail Price?")
   const handleApprovePurchasePriceStep1 = () => {
     if (!priceChangePrompt) return;
+    const finalPurchase = round2(priceChangePrompt.newPurchasePrice);
+    const recalculated = calculateItemPricingFromPurchase(finalPurchase, priceChangePrompt.packing);
     setPriceChangePrompt({
       ...priceChangePrompt,
       step: 'confirm_retail',
+      newPurchasePrice: finalPurchase,
+      retailBase: recalculated.retailPrice,
+      newRetailPrice: recalculated.retailPrice,
+      newLooseRate: recalculated.looseRate,
+      looseRateManuallyEdited: false,
     });
   };
 
@@ -1292,15 +1382,23 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const handleFinalPriceCascadeDecision = (updateRetail: boolean) => {
     if (!priceChangePrompt) return;
     const prompt = priceChangePrompt;
+    const finalPurchase = round2(prompt.newPurchasePrice);
+    const finalRetail = round2(prompt.newRetailPrice);
+    const finalLoose = round2(prompt.newLooseRate);
+    lastPromptedRateByRowRef.current[prompt.rowIndex] = finalPurchase;
+    isPricePromptOpenRef.current = false;
+    handleLineChange(prompt.rowIndex, 'purchase_rate', finalPurchase);
     setLines((prev) => {
       const next = [...prev];
       if (next[prompt.rowIndex]) {
         next[prompt.rowIndex] = {
           ...next[prompt.rowIndex],
-          mrp_rate: updateRetail ? prompt.newRetailPrice : next[prompt.rowIndex].mrp_rate,
-          master_purchase_price: prompt.newPurchasePrice,
-          master_retail_price: updateRetail ? prompt.newRetailPrice : prompt.oldRetailPrice,
-          last_prompted_purchase_rate: prompt.newPurchasePrice,
+          purchase_rate: finalPurchase,
+          mrp_rate: updateRetail ? finalRetail : next[prompt.rowIndex].mrp_rate,
+          master_purchase_price: finalPurchase,
+          master_retail_price: updateRetail ? finalRetail : prompt.oldRetailPrice,
+          master_loose_rate: updateRetail ? finalLoose : prompt.oldLooseRate,
+          last_prompted_purchase_rate: finalPurchase,
           update_master_purchase_price: true,
           update_master_retail_price: updateRetail,
         };
@@ -1309,15 +1407,70 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     });
     setFormSuccess(
       updateRetail
-        ? `"${prompt.itemName}": Item Master will be updated when this invoice is saved — Purchase Rs. ${prompt.newPurchasePrice.toFixed(
+        ? `"${prompt.itemName}": Item Master will be updated when this invoice is saved — Purchase Rs. ${finalPurchase.toFixed(
             2
-          )}, Retail Rs. ${prompt.newRetailPrice.toFixed(2)}, Loose Rs. ${prompt.newLooseRate.toFixed(2)}.`
-        : `"${prompt.itemName}": Item Master Purchase Price will be updated to Rs. ${prompt.newPurchasePrice.toFixed(
+          )}, Retail Rs. ${finalRetail.toFixed(2)}, Loose Rs. ${finalLoose.toFixed(2)}.`
+        : `"${prompt.itemName}": Item Master Purchase Price will be updated to Rs. ${finalPurchase.toFixed(
             2
           )} when this invoice is saved. Retail Price (Rs. ${prompt.oldRetailPrice.toFixed(2)}) stays unchanged.`
     );
     setPriceChangePrompt(null);
-    focusTargetElementById(prompt.nextFocusTargetId);
+    const fallbackTargetId = `${purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell'}_${prompt.rowIndex}_purchase_rate`;
+    focusTargetElementById(prompt.nextFocusTargetId || fallbackTargetId);
+  };
+
+  const handlePriceDialogKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!priceChangePrompt) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      handleCancelPriceChangePrompt();
+      return;
+    }
+
+    if (e.key === 'Tab') {
+      const container = priceDialogRef.current;
+      if (!container) return;
+      const focusable = Array.from(
+        container.querySelectorAll<HTMLElement>(
+          'input:not([disabled]), button:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )
+      ).filter((el) => el.offsetParent !== null);
+      if (focusable.length === 0) return;
+      const activeIdx = focusable.indexOf(document.activeElement as HTMLElement);
+      e.preventDefault();
+      e.stopPropagation();
+      const nextIdx = e.shiftKey
+        ? activeIdx <= 0
+          ? focusable.length - 1
+          : activeIdx - 1
+        : activeIdx === -1 || activeIdx >= focusable.length - 1
+        ? 0
+        : activeIdx + 1;
+      const nextEl = focusable[nextIdx];
+      nextEl.focus();
+      if (nextEl instanceof HTMLInputElement && typeof nextEl.select === 'function') {
+        nextEl.select();
+      }
+      return;
+    }
+
+    if (e.key === 'Enter') {
+      const activeEl = document.activeElement as HTMLElement | null;
+      if (activeEl && activeEl.tagName === 'BUTTON') {
+        e.preventDefault();
+        e.stopPropagation();
+        activeEl.click();
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      if (priceChangePrompt.step === 'confirm_purchase') {
+        handleApprovePurchasePriceStep1();
+      } else {
+        handleFinalPriceCascadeDecision(true);
+      }
+    }
   };
 
   const applyItemToPurchaseRow = (
@@ -1325,6 +1478,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     found: Item,
     focusQty: boolean = true
   ) => {
+    delete lastPromptedRateByRowRef.current[idx];
     setLines((prev) => {
       const copy = [...prev];
       const existingSameItem = copy[idx]?.item_id === found.id ? copy[idx] : undefined;
@@ -2063,25 +2217,34 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       return;
     }
 
-    if (
-      (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) &&
-      field === 'bonus_quantity'
-    ) {
-      // After the last entry field, loop back to Item Name and open the item list.
+    if (e.key === 'Enter' && field === 'bonus_quantity') {
+      // Complete current item entry, move to the NEXT NEW empty invoice row,
+      // preserve all existing rows, open Item List popup for the NEW row, and auto-focus Search.
       e.preventDefault();
-      setSelectedPurchaseLineIndex(rowIdx);
+      suppressItemListReopenRef.current = false;
+      const nextNewRowIdx = findNextBlankPurchaseRowIndex(lines, rowIdx);
+      if (nextNewRowIdx >= lines.length) {
+        setLines((prev) =>
+          ensureMinimumPurchaseRows(
+            [...prev, createBlankPurchaseLine()],
+            visibleRowCapacityRef.current,
+            nextNewRowIdx
+          )
+        );
+      }
+      setSelectedPurchaseLineIndex(nextNewRowIdx);
+      setPurchaseRecordJumpInput(String(nextNewRowIdx + 1));
       setActiveRowItemSearchIdx(null);
       setActiveRowItemSearchField(null);
       setRowItemSearchQuery('');
-      const itemNameId = `${prefix}_${rowIdx}_item_name`;
-      setTimeout(() => {
-        focusPurchaseCell(rowIdx, 'item_name', prefix);
-        openPurchaseItemListForRow(
-          rowIdx,
-          prefix === 'pos_row' ? 'pos_row' : 'access_row',
-          itemNameId
-        );
-      }, 20);
+      const itemNameId = `${prefix}_${nextNewRowIdx}_item_name`;
+      const originMode = prefix === 'pos_row' ? 'pos_row' : 'access_row';
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          focusPurchaseCell(nextNewRowIdx, 'item_name', prefix);
+          openPurchaseItemListForRow(nextNewRowIdx, originMode, itemNameId);
+        }, 25);
+      });
       return;
     }
 
@@ -2222,6 +2385,9 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setPaidAmount(0);
     setPaidAmountManuallyEdited(false);
     setLines(ensureMinimumPurchaseRows([], visibleRowCapacityRef.current, 0));
+    lastPromptedRateByRowRef.current = {};
+    isPricePromptOpenRef.current = false;
+    setPriceChangePrompt(null);
     setSelectedPurchaseLineIndex(0);
     setPurchaseSearchQuery('');
     setShowPurchaseSearchDropdown(false);
@@ -2353,16 +2519,24 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       }
       const updateRetail = Boolean(l.update_master_retail_price);
       const masterItem = items.find((it) => it.id === l.item_id);
-      const units = Math.max(1, parseUnitsPerPack(masterItem?.packing || l.packing || '1x1'));
+      const packingStr = masterItem?.packing || l.packing || '1x1';
       const { roundedRetailPrice } = calculateRetailFromPurchasePrice(newPurchase);
+      const finalRetail =
+        l.master_retail_price && l.master_retail_price > 0
+          ? round2(l.master_retail_price)
+          : roundedRetailPrice;
+      const finalLoose =
+        l.master_loose_rate && l.master_loose_rate > 0
+          ? round2(l.master_loose_rate)
+          : calculateLooseRateFromRetail(finalRetail, packingStr);
       const body = {
         new_purchase_price: newPurchase,
         update_purchase_price: true,
         update_retail_price: updateRetail,
         ...(updateRetail
           ? {
-              new_retail_price: roundedRetailPrice,
-              new_loose_rate: round2(roundedRetailPrice / units),
+              new_retail_price: finalRetail,
+              new_loose_rate: finalLoose,
             }
           : {}),
       };
@@ -2758,6 +2932,16 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   useEffect(() => {
     const handleGlobalShortcuts = (e: KeyboardEvent) => {
       if (subTab !== 'new-invoice') return;
+      if (
+        priceChangePrompt ||
+        showPurchaseItemListModal ||
+        pendingDuplicatePrompt ||
+        showAddSupplierModal ||
+        showPurchaseSmsModal ||
+        printModalOpen
+      ) {
+        return;
+      }
       if (e.key === 'F2' || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's')) {
         e.preventDefault();
         handleSavePurchaseInvoice();
@@ -2786,6 +2970,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     taxOverrideReason,
     supplierInvoiceNumber,
     billDate,
+    priceChangePrompt,
+    showPurchaseItemListModal,
+    pendingDuplicatePrompt,
+    showAddSupplierModal,
+    showPurchaseSmsModal,
+    printModalOpen,
   ]);
 
   // Open A4 Print Modal for Purchase Return
@@ -6086,8 +6276,23 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
       {/* ================= MODAL: PURCHASE PRICE CHANGE & RETAIL PRICE UPDATE CONFIRMATION ================= */}
       {priceChangePrompt && (
-        <div className="fixed inset-0 z-50 bg-slate-900/65 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl w-full max-w-md overflow-hidden text-xs">
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/65 backdrop-blur-xs flex items-center justify-center p-4"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) {
+              handleCancelPriceChangePrompt();
+            }
+          }}
+        >
+          <div
+            ref={priceDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Purchase Price Update Confirmation"
+            tabIndex={-1}
+            onKeyDown={handlePriceDialogKeyDown}
+            className="bg-white rounded-2xl border border-slate-200 shadow-2xl w-full max-w-md overflow-hidden text-xs focus:outline-none"
+          >
             {priceChangePrompt.step === 'confirm_purchase' ? (
               <div className="p-5 space-y-4">
                 <div className="flex items-start gap-3">
@@ -6104,7 +6309,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   </div>
                 </div>
 
-                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2">
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2.5">
                   <div className="flex items-center justify-between border-b border-slate-200 pb-2">
                     <span className="text-slate-500 font-semibold">Item:</span>
                     <span className="font-bold text-slate-900 text-right">
@@ -6120,32 +6325,67 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                       Rs. {priceChangePrompt.oldPurchasePrice.toFixed(2)}
                     </span>
                   </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-900 font-bold">New Purchase Price:</span>
-                    <span className="font-mono font-black text-emerald-700 text-sm">
-                      Rs. {priceChangePrompt.newPurchasePrice.toFixed(2)}
-                    </span>
+                  <div className="flex items-center justify-between gap-3">
+                    <label
+                      htmlFor="price_dialog_new_purchase_price"
+                      className="text-slate-900 font-bold"
+                    >
+                      New Purchase Price:
+                    </label>
+                    <div className="relative w-32">
+                      <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[11px] font-mono text-emerald-600">
+                        Rs.
+                      </span>
+                      <NumericInput
+                        id="price_dialog_new_purchase_price"
+                        ref={priceDialogPurchaseInputRef}
+                        value={priceChangePrompt.newPurchasePrice}
+                        onChange={(e) => {
+                          const nextPurchase = Math.max(0, parseFloat(e.target.value) || 0);
+                          const nextPricing = calculateItemPricingFromPurchase(
+                            nextPurchase,
+                            priceChangePrompt.packing
+                          );
+                          setPriceChangePrompt((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  newPurchasePrice: nextPurchase,
+                                  retailBase: nextPricing.retailPrice,
+                                  newRetailPrice: nextPricing.retailPrice,
+                                  newLooseRate: nextPricing.looseRate,
+                                }
+                              : null
+                          );
+                        }}
+                        className="w-full pl-8 pr-2 py-1 text-right font-mono font-black text-emerald-800 text-sm rounded-lg border border-emerald-400 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      />
+                    </div>
                   </div>
                 </div>
 
-                <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
-                  <button
-                    type="button"
-                    disabled={updatingItemMasterPrice}
-                    onClick={handleKeepOldPurchasePrice}
-                    className="px-4 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 font-bold cursor-pointer"
-                  >
-                    NO – Keep Old
-                  </button>
-                  <button
-                    type="button"
-                    autoFocus
-                    disabled={updatingItemMasterPrice}
-                    onClick={handleApprovePurchasePriceStep1}
-                    className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow-sm cursor-pointer"
-                  >
-                    YES – Update
-                  </button>
+                <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-100">
+                  <span className="text-[10px] text-slate-400">
+                    Tab: Navigate • Enter: Confirm • Esc: Cancel
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={updatingItemMasterPrice}
+                      onClick={handleKeepOldPurchasePrice}
+                      className="px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 focus:ring-2 focus:ring-slate-400 text-slate-800 font-bold cursor-pointer outline-none"
+                    >
+                      NO – Keep Old
+                    </button>
+                    <button
+                      type="button"
+                      disabled={updatingItemMasterPrice}
+                      onClick={handleApprovePurchasePriceStep1}
+                      className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 focus:ring-2 focus:ring-emerald-400 text-white font-bold shadow-sm cursor-pointer outline-none"
+                    >
+                      YES – Update
+                    </button>
+                  </div>
                 </div>
               </div>
             ) : (
@@ -6159,12 +6399,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                       Do you also want to update Retail Price?
                     </h3>
                     <p className="text-[11px] text-slate-500 mt-0.5">
-                      Formula: Retail = New Purchase Price ÷ 0.85 (2 decimals, no rounding to 50) &amp; Loose Rate = Retail ÷ Units Per Pack.
+                      Formula: Retail = New Purchase Price ÷ 0.85 (2 decimals) &amp; Loose Rate = Retail ÷ Units Per Pack.
                     </p>
                   </div>
                 </div>
 
-                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2">
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2.5">
                   <div className="flex items-center justify-between border-b border-slate-200 pb-1.5">
                     <span className="text-slate-500 font-semibold">Item &amp; Packing:</span>
                     <span className="font-bold text-slate-900">
@@ -6178,47 +6418,96 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                       Rs. {priceChangePrompt.newPurchasePrice.toFixed(2)}
                     </span>
                   </div>
-                  <div className="flex items-center justify-between bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
+                  <div className="flex items-center justify-between gap-3 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
                     <div>
-                      <div className="font-bold text-emerald-950">New Retail Price (Purchase ÷ 0.85):</div>
+                      <label
+                        htmlFor="price_dialog_new_retail_price"
+                        className="font-bold text-emerald-950 block"
+                      >
+                        New Retail Price (Purchase ÷ 0.85):
+                      </label>
                       <div className="text-[10px] text-slate-500">
                         Current Retail: Rs. {priceChangePrompt.oldRetailPrice.toFixed(2)}
                       </div>
                     </div>
-                    <span className="font-mono font-black text-emerald-700 text-base">
-                      Rs. {priceChangePrompt.newRetailPrice.toFixed(2)}
-                    </span>
+                    <div className="relative w-32 shrink-0">
+                      <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[11px] font-mono text-emerald-600">
+                        Rs.
+                      </span>
+                      <NumericInput
+                        id="price_dialog_new_retail_price"
+                        ref={priceDialogRetailInputRef}
+                        value={priceChangePrompt.newRetailPrice}
+                        onChange={(e) => {
+                          const nextRetail = Math.max(0, parseFloat(e.target.value) || 0);
+                          setPriceChangePrompt((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  newRetailPrice: nextRetail,
+                                  newLooseRate: prev.looseRateManuallyEdited
+                                    ? prev.newLooseRate
+                                    : calculateLooseRateFromRetail(nextRetail, prev.packing),
+                                }
+                              : null
+                          );
+                        }}
+                        className="w-full pl-7 pr-2 py-1 text-right font-mono font-black text-emerald-800 text-sm rounded-lg border border-emerald-400 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      />
+                    </div>
                   </div>
-                  <div className="flex items-center justify-between bg-blue-50 border border-blue-200 rounded-lg px-2.5 py-1.5">
+                  <div className="flex items-center justify-between gap-3 bg-blue-50 border border-blue-200 rounded-lg px-2.5 py-1.5">
                     <div>
-                      <div className="font-bold text-blue-950">
+                      <label
+                        htmlFor="price_dialog_new_loose_rate"
+                        className="font-bold text-blue-950 block"
+                      >
                         New Loose Rate (÷ {priceChangePrompt.unitsPerPack} units):
-                      </div>
+                      </label>
                       <div className="text-[10px] text-slate-500">
                         Current Loose Rate: Rs. {priceChangePrompt.oldLooseRate.toFixed(2)}
                       </div>
                     </div>
-                    <span className="font-mono font-black text-blue-700 text-sm">
-                      Rs. {priceChangePrompt.newLooseRate.toFixed(2)}
-                    </span>
+                    <div className="relative w-32 shrink-0">
+                      <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[11px] font-mono text-blue-600">
+                        Rs.
+                      </span>
+                      <NumericInput
+                        id="price_dialog_new_loose_rate"
+                        ref={priceDialogLooseInputRef}
+                        value={priceChangePrompt.newLooseRate}
+                        onChange={(e) => {
+                          const nextLoose = Math.max(0, parseFloat(e.target.value) || 0);
+                          setPriceChangePrompt((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  newLooseRate: nextLoose,
+                                  looseRateManuallyEdited: true,
+                                }
+                              : null
+                          );
+                        }}
+                        className="w-full pl-7 pr-2 py-1 text-right font-mono font-black text-blue-800 text-sm rounded-lg border border-blue-400 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
                   </div>
                 </div>
 
-                <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
                   <button
                     type="button"
                     disabled={updatingItemMasterPrice}
                     onClick={() => handleFinalPriceCascadeDecision(false)}
-                    className="px-4 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 font-bold cursor-pointer disabled:opacity-50"
+                    className="px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 focus:ring-2 focus:ring-slate-400 text-slate-800 font-bold cursor-pointer disabled:opacity-50 outline-none"
                   >
                     NO – Keep Existing Retail
                   </button>
                   <button
                     type="button"
-                    autoFocus
                     disabled={updatingItemMasterPrice}
                     onClick={() => handleFinalPriceCascadeDecision(true)}
-                    className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow-sm cursor-pointer disabled:opacity-50"
+                    className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 focus:ring-2 focus:ring-emerald-400 text-white font-bold shadow-sm cursor-pointer disabled:opacity-50 outline-none"
                   >
                     {updatingItemMasterPrice ? 'Updating...' : 'YES – Update Retail & Loose Rate'}
                   </button>

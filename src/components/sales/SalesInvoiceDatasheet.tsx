@@ -483,8 +483,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [lastSavedWhatsappPayload, setLastSavedWhatsappPayload] =
     useState<WhatsAppDocumentPayload | null>(null);
-  const [autoWhatsappOnSave, setAutoWhatsappOnSave] = useState<boolean>(false);
   const [storeDisplayName, setStoreDisplayName] = useState<string>('ABRAR MEDICAL STORE');
+  const customerEnterFocusTimestampRef = useRef<number>(0);
 
   // Load initial reference data + restore draft from localStorage
   const loadReferenceData = useCallback(async () => {
@@ -505,7 +505,6 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         if (settingsRes.data.store_name) {
           setStoreDisplayName(String(settingsRes.data.store_name));
         }
-        setAutoWhatsappOnSave(Boolean(settingsRes.data.auto_whatsapp_on_save));
         const storedNegPref = localStorage.getItem('ams_allow_negative_stock_sales');
         if (storedNegPref === null && settingsRes.data.allow_negative_stock !== undefined) {
           const dbAllowNeg = Number(settingsRes.data.allow_negative_stock) === 1;
@@ -1897,13 +1896,12 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       };
       setLastSavedWhatsappPayload(waPayload);
 
-      // Check latest company settings for Auto-send on save
+      // Refresh store display name (never auto-trigger WhatsApp after save/update)
       api
         .getCompanySettings()
         .then((sRes) => {
-          if (sRes?.data) {
-            if (sRes.data.store_name) setStoreDisplayName(sRes.data.store_name);
-            setAutoWhatsappOnSave(Number(sRes.data.auto_whatsapp_on_save || 0) === 1);
+          if (sRes?.data?.store_name) {
+            setStoreDisplayName(sRes.data.store_name);
           }
         })
         .catch(() => null);
@@ -2401,6 +2399,44 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }
   };
 
+  // Focus the Item Search field inside a NEW empty invoice row (used after selecting Customer + pressing Enter)
+  const focusNewRowItemSearch = () => {
+    const now = Date.now();
+    if (now - customerEnterFocusTimestampRef.current < 120) return;
+    customerEnterFocusTimestampRef.current = now;
+
+    const firstBlankIdx = rows.findIndex((r) => !r.item_id);
+    const targetRowIdx = firstBlankIdx >= 0 ? firstBlankIdx : rows.length;
+    if (targetRowIdx >= rows.length) {
+      setRows((prev) => ensureMinimumRows([...prev, createEmptyRow()]));
+    }
+    setSelectedRowIndex(targetRowIdx);
+    setRecordJumpInput(String(targetRowIdx + 1));
+    setShowSearchDropdown(false);
+    setActiveSearchRowIdx(null);
+
+    const prefix = invoiceViewMode === 'pos' ? 'pos_row' : 'cell';
+    window.requestAnimationFrame(() => {
+      setTimeout(() => {
+        focusCell(targetRowIdx, 'item_name', prefix);
+      }, 25);
+    });
+  };
+
+  const handleSelectCustomerAccount = (id: number) => {
+    setCustomerAccountId(id);
+    if (id > 0) {
+      refreshCustomerBalanceSummary(id, editingSaleId);
+      const chosenCust = customers.find((c) => Number(c.id) === id);
+      if (chosenCust?.assigned_salesman_id && (!salesmanId || salesman === 'Counter Pharmacist')) {
+        setSalesmanId(Number(chosenCust.assigned_salesman_id));
+        setSalesman(chosenCust.assigned_salesman_name || 'Counter Pharmacist');
+      }
+    } else {
+      setLiveBalanceSummary(null);
+    }
+  };
+
   const navigateToRecord = (targetIdx: number, preferredCol?: string) => {
     const clamped = Math.max(0, Math.min(entryRowIdx, targetIdx));
     setSelectedRowIndex(clamped);
@@ -2846,6 +2882,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   // Global Keyboard Shortcuts (F2: Item Search, F3: Focus Search Bar, Ctrl+S: Save, Ctrl+P: Print, Ctrl+N: New, F9: Hold, Esc: Close Modals/Dropdown)
   useEffect(() => {
     const handleGlobalShortcuts = (e: KeyboardEvent) => {
+      if (
+        pendingDuplicatePrompt ||
+        showEditSearchModal ||
+        showDsrModal ||
+        showSalesSmsModal ||
+        printInvoice
+      ) {
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
         handleSaveInvoice('completed');
@@ -2888,7 +2933,18 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
     window.addEventListener('keydown', handleGlobalShortcuts);
     return () => window.removeEventListener('keydown', handleGlobalShortcuts);
-  }, [handleSaveInvoice, resetToNewInvoice, selectedRowIndex, showItemListModal, showSearchDropdown]);
+  }, [
+    handleSaveInvoice,
+    resetToNewInvoice,
+    selectedRowIndex,
+    showItemListModal,
+    showSearchDropdown,
+    pendingDuplicatePrompt,
+    showEditSearchModal,
+    showDsrModal,
+    showSalesSmsModal,
+    printInvoice,
+  ]);
 
   const filteredCustomers = customers.filter((c) => {
     if (!customerSearchText.trim()) return true;
@@ -2992,9 +3048,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 compact
                 label={`Send ${lastSavedWhatsappPayload.documentNumber} via WhatsApp`}
                 payload={lastSavedWhatsappPayload}
-                autoTriggerKey={
-                  autoWhatsappOnSave ? lastSavedWhatsappPayload.documentNumber : null
-                }
+                autoTriggerKey={null}
                 onPhoneSaved={(newPhone) => {
                   setLastSavedWhatsappPayload((prev) =>
                     prev ? { ...prev, customerPhone: newPhone } : prev
@@ -3186,16 +3240,18 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   value={customerAccountId}
                   onChange={(e) => {
                     const id = Number(e.target.value);
-                    setCustomerAccountId(id);
-                    if (id > 0) {
-                      refreshCustomerBalanceSummary(id, editingSaleId);
-                      const chosenCust = customers.find((c) => Number(c.id) === id);
-                      if (chosenCust?.assigned_salesman_id && (!salesmanId || salesman === 'Counter Pharmacist')) {
-                        setSalesmanId(Number(chosenCust.assigned_salesman_id));
-                        setSalesman(chosenCust.assigned_salesman_name || 'Counter Pharmacist');
-                      }
-                    } else {
-                      setLiveBalanceSummary(null);
+                    handleSelectCustomerAccount(id);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      setTimeout(() => {
+                        focusNewRowItemSearch();
+                      }, 25);
+                    }
+                  }}
+                  onKeyUp={(e) => {
+                    if (e.key === 'Enter') {
+                      focusNewRowItemSearch();
                     }
                   }}
                   className="flex-1 min-w-0 px-1.5 py-0 font-bold rounded border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
@@ -4295,22 +4351,38 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   placeholder="Find..."
                   value={customerSearchText}
                   onChange={(e) => setCustomerSearchText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      if (customerSearchText.trim() && filteredCustomers.length > 0) {
+                        const alreadyMatches = filteredCustomers.some(
+                          (c) => Number(c.id) === Number(customerAccountId)
+                        );
+                        if (!alreadyMatches) {
+                          handleSelectCustomerAccount(Number(filteredCustomers[0].id));
+                        }
+                      }
+                      focusNewRowItemSearch();
+                    }
+                  }}
                   className="w-16 px-1 py-0 rounded border border-slate-300 bg-white"
                 />
                 <select
                   value={customerAccountId}
                   onChange={(e) => {
                     const id = Number(e.target.value);
-                    setCustomerAccountId(id);
-                    if (id > 0) {
-                      refreshCustomerBalanceSummary(id, editingSaleId);
-                      const chosenCust = customers.find((c) => Number(c.id) === id);
-                      if (chosenCust?.assigned_salesman_id && (!salesmanId || salesman === 'Counter Pharmacist')) {
-                        setSalesmanId(Number(chosenCust.assigned_salesman_id));
-                        setSalesman(chosenCust.assigned_salesman_name || 'Counter Pharmacist');
-                      }
-                    } else {
-                      setLiveBalanceSummary(null);
+                    handleSelectCustomerAccount(id);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      setTimeout(() => {
+                        focusNewRowItemSearch();
+                      }, 25);
+                    }
+                  }}
+                  onKeyUp={(e) => {
+                    if (e.key === 'Enter') {
+                      focusNewRowItemSearch();
                     }
                   }}
                   className="flex-1 min-w-0 px-1 py-0 rounded border border-slate-300 font-bold text-slate-900 bg-white"

@@ -66,6 +66,7 @@ export interface PurchaseLineItem {
   returned_quantity?: number;
   master_purchase_price?: number;
   master_retail_price?: number;
+  master_loose_rate?: number;
   last_prompted_purchase_rate?: number;
   update_master_purchase_price?: boolean;
   update_master_retail_price?: boolean;
