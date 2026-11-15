@@ -40,6 +40,7 @@ export interface PurchaseLineItem {
   item_id: number;
   inventory_id?: number;
   item_code: string;
+  barcode?: string;
   company_name: string;
   item_name: string;
   packing: string;

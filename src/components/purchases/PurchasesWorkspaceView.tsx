@@ -1110,25 +1110,37 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   // Build a populated PurchaseLineItem from an Item record (Default Quantity = 0)
   const buildPopulatedLineFromItem = (
     found: Item,
-    existingRow?: Partial<PurchaseLineItem>
+    existingRow?: Partial<PurchaseLineItem>,
+    preserveQtyAndDiscountOnly: boolean = false
   ): PurchaseLineItem => {
     const rate = round2(
       Number(found.purchase_price) || Number(found.trade_price) || Number(found.retail_price) || 0
     );
     const unitsPerPack = Math.max(1, parseUnitsPerPack(found.packing));
-    const qty = existingRow?.quantity && existingRow.quantity > 0 ? existingRow.quantity : 0;
+    const hasExistingQty =
+      existingRow?.quantity !== undefined && existingRow?.quantity !== null;
+    const qty = hasExistingQty ? Math.max(0, Number(existingRow.quantity) || 0) : 0;
+    const hasExistingDiscount =
+      existingRow?.discount_percent !== undefined && existingRow?.discount_percent !== null;
+    const discPct = hasExistingDiscount
+      ? Math.max(0, round2(Number(existingRow.discount_percent) || 0))
+      : round2(found.discount_percent || 0);
+
     const looseQty =
-      existingRow?.loose_quantity && existingRow.loose_quantity > 0
+      !preserveQtyAndDiscountOnly && existingRow?.loose_quantity && existingRow.loose_quantity > 0
         ? round2(existingRow.loose_quantity)
         : 0;
     const bonusQty =
-      existingRow?.bonus_quantity && existingRow.bonus_quantity > 0 ? existingRow.bonus_quantity : 0;
+      !preserveQtyAndDiscountOnly && existingRow?.bonus_quantity && existingRow.bonus_quantity > 0
+        ? existingRow.bonus_quantity
+        : 0;
     const defaultLooseRate = round2(rate / unitsPerPack);
     const looseRate =
-      existingRow?.loose_rate !== undefined && existingRow.loose_rate > 0
+      !preserveQtyAndDiscountOnly &&
+      existingRow?.loose_rate !== undefined &&
+      existingRow.loose_rate > 0
         ? round2(existingRow.loose_rate)
         : defaultLooseRate;
-    const discPct = round2(found.discount_percent || 0);
     const taxPct = round2(found.tax_percent || 0);
     const gross = round2(qty * rate + looseQty * looseRate);
     const discAmt = round2(gross * (discPct / 100));
@@ -1139,19 +1151,30 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     return {
       item_id: found.id,
       item_code: found.item_code,
+      barcode: found.barcode || '',
       company_name: found.company_name,
       item_name: found.item_name,
       packing: found.packing || '1x1',
       units_per_pack: unitsPerPack,
-      batch_number: existingRow?.batch_number || `B-${found.item_code}-01`,
-      manufacturing_date: existingRow?.manufacturing_date || '2026-01-01',
-      expiry_date: existingRow?.expiry_date || '2028-12-31',
+      batch_number:
+        !preserveQtyAndDiscountOnly && existingRow?.batch_number
+          ? existingRow.batch_number
+          : `B-${found.item_code}-01`,
+      manufacturing_date:
+        !preserveQtyAndDiscountOnly && existingRow?.manufacturing_date
+          ? existingRow.manufacturing_date
+          : '2026-01-01',
+      expiry_date:
+        !preserveQtyAndDiscountOnly && existingRow?.expiry_date
+          ? existingRow.expiry_date
+          : '2028-12-31',
       quantity: qty,
       loose_quantity: looseQty,
       bonus_quantity: bonusQty,
       purchase_rate: rate,
       loose_rate: looseRate,
-      is_loose_rate_manual: Boolean(existingRow?.is_loose_rate_manual),
+      is_loose_rate_manual:
+        !preserveQtyAndDiscountOnly && Boolean(existingRow?.is_loose_rate_manual),
       mrp_rate: round2(found.retail_price || 0),
       gross_amount: gross,
       discount_percent: discPct,
@@ -1481,11 +1504,20 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     delete lastPromptedRateByRowRef.current[idx];
     setLines((prev) => {
       const copy = [...prev];
-      const existingSameItem = copy[idx]?.item_id === found.id ? copy[idx] : undefined;
+      const prevRow = copy[idx];
+      const hasExistingItem = Boolean(prevRow && prevRow.item_id && prevRow.item_id > 0);
+      const isSameItem = Boolean(prevRow && prevRow.item_id === found.id);
+      const hasPreEnteredQtyOrDisc = Boolean(
+        prevRow && (Number(prevRow.quantity || 0) > 0 || Number(prevRow.discount_percent || 0) > 0)
+      );
       while (copy.length <= idx) {
         copy.push(createBlankPurchaseLine());
       }
-      copy[idx] = buildPopulatedLineFromItem(found, existingSameItem);
+      copy[idx] = buildPopulatedLineFromItem(
+        found,
+        hasExistingItem || hasPreEnteredQtyOrDisc ? prevRow : undefined,
+        hasExistingItem ? !isSameItem : hasPreEnteredQtyOrDisc
+      );
       return ensureMinimumPurchaseRows(copy, visibleRowCapacityRef.current, idx);
     });
     setSelectedPurchaseLineIndex(idx);

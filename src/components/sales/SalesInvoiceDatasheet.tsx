@@ -87,6 +87,7 @@ export function createEmptyRow(): DatasheetRow {
     item_id: null,
     inventory_id: null,
     item_code: '',
+    barcode: '',
     company_name: '',
     item_name: '',
     packing: '',
@@ -651,8 +652,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       rowIndex: number,
       itemId: number,
       custId: number,
-      currentInvType: SalesInvoiceType,
-      applySuggestedPricing: boolean = true
+      _currentInvType: SalesInvoiceType,
+      applySuggestedOffers: boolean = true
     ) => {
       if (!itemId) return;
       const cacheKey = `${itemId}_${custId || 0}`;
@@ -678,41 +679,19 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             lastCustomerInvoiceNo: lastSale ? String(lastSale.invoice_number) : null,
             lastCustomerSoldQty: lastSale ? Number(lastSale.quantity || 0) : null,
             previousCustomerSaleRateBeforeLast: prevBeforeLast ? round2(prevBeforeLast.unit_price) : null,
-            lastPurchaseCostRate: lastPur ? round2(lastPur.purchase_price) : null,
+            lastPurchaseCostRate: lastPur ? round2(lastPur.purchase_price) : target.lastPurchaseCostRate ?? null,
             lastPurchaseDate: lastPur ? String(lastPur.bill_date) : null,
             lastSupplierName: lastPur ? String(lastPur.supplier_name || '') : null,
           };
 
-          // Only apply auto-pricing when item is added/changed or customer explicitly changed, never on passive row click/navigation
-          if (applySuggestedPricing && !target.isRateManuallyEdited && !target.isLooseRateManuallyEdited) {
-            if (lastSale && Number(lastSale.unit_price) > 0) {
-              const suggestedPrice = round2(lastSale.unit_price);
-              const suggestedLoose =
-                Number(lastSale.loose_rate) > 0
-                  ? round2(lastSale.loose_rate)
-                  : round2(suggestedPrice / Math.max(1, target.units_per_pack));
-              updatedRow.unit_price = suggestedPrice;
-              updatedRow.loose_rate = suggestedLoose;
-              updatedRow.discount_percent = round2(lastSale.discount_percent || 0);
-              updatedRow.rateSuggestionSource = 'customer_last_sale';
-            } else {
-              const fallbackPrice =
-                currentInvType === 'Wholesale'
-                  ? round2(target.wholesale_price_ref || target.unit_price)
-                  : round2(target.retail_price_ref || target.unit_price);
-              updatedRow.unit_price = fallbackPrice;
-              updatedRow.loose_rate = round2(fallbackPrice / Math.max(1, target.units_per_pack));
-              updatedRow.rateSuggestionSource =
-                currentInvType === 'Wholesale' ? 'standard_wholesale' : 'standard_retail';
-            }
-          }
-
-          next[rowIndex] = applySuggestedPricing ? recalcRow(updatedRow) : updatedRow;
+          // Default Sale Price always follows Invoice Type (MRP for Retail, Wholesale Price for Wholesale)
+          // and is never overwritten automatically by past customer sale rates.
+          next[rowIndex] = updatedRow;
           return next;
         });
 
-        if (applySuggestedPricing) {
-          // Also evaluate active Trade Deals & Party Special Discounts from the centralized engine
+        if (applySuggestedOffers) {
+          // Evaluate active Trade Deals & Party Special Discounts only for newly added items (not when replacing Item Name to preserve Discount)
           const resCalc = await fetch('/api/enhancements/calculate-line', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -792,19 +771,18 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     []
   );
 
-  // When Customer changes, refresh Customer-Wise Last Sale History for all existing item rows
+  // When Customer changes, refresh Customer-Wise Last Sale History metadata without modifying existing row prices/discounts
   const prevCustomerIdRef = useRef<number>(customerAccountId);
   useEffect(() => {
     if (customerAccountId > 0 && prevCustomerIdRef.current !== customerAccountId) {
       prevCustomerIdRef.current = customerAccountId;
       rows.forEach((r, idx) => {
         if (r.item_id) {
-          fetchAndApplyItemHistory(idx, r.item_id, customerAccountId, invoiceType);
-          evaluateOfferAndPartyDiscountForRow(idx, r.item_id, r.quantity, customerAccountId, r.unit_price);
+          fetchAndApplyItemHistory(idx, r.item_id, customerAccountId, invoiceType, false);
         }
       });
     }
-  }, [customerAccountId, rows, invoiceType, fetchAndApplyItemHistory, evaluateOfferAndPartyDiscountForRow]);
+  }, [customerAccountId, rows, invoiceType, fetchAndApplyItemHistory]);
 
   // Also ensure the currently selected row has its history metadata loaded (never altering row rates/discounts on click)
   useEffect(() => {
@@ -946,6 +924,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               item_id: Number(line.item_id),
               inventory_id: line.inventory_id ? Number(line.inventory_id) : null,
               item_code: String(line.item_code),
+              barcode: String(line.barcode || catMatch?.barcode || ''),
               company_name: String(line.company_name || catMatch?.company_name || ''),
               item_name: String(line.item_name),
               packing: String(line.packing || '1x1'),
@@ -971,6 +950,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               line_total: Number(line.line_total || 0),
               retail_price_ref: Number(catMatch?.retail_price || line.unit_price || 0),
               wholesale_price_ref: Number(catMatch?.wholesale_price || line.unit_price || 0),
+              lastPurchaseCostRate: catMatch?.purchase_price ? round2(catMatch.purchase_price) : null,
               batches: catMatch?.batches || [],
               isRateManuallyEdited: true,
               isLooseRateManuallyEdited: true,
@@ -1037,28 +1017,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }
   }, [configuredTaxRate, isTaxOverridden]);
 
-  // Switch Retail / Wholesale Pricing automatically on existing rows (without overwriting manual or customer-history rates!)
+  // Switch Retail / Wholesale Invoice Type for newly added items ONLY (existing rows strictly retain their prices)
   const handleInvoiceTypeChange = (newType: SalesInvoiceType) => {
     setInvoiceType(newType);
-    setRows((prev) =>
-      prev.map((row) => {
-        if (!row.item_id) return row;
-        if (row.isRateManuallyEdited || row.rateSuggestionSource === 'customer_last_sale') {
-          return row;
-        }
-        const targetPrice =
-          newType === 'Wholesale'
-            ? row.wholesale_price_ref || row.unit_price
-            : row.retail_price_ref || row.unit_price;
-        const targetLoose = round2(targetPrice / Math.max(1, row.units_per_pack));
-        return recalcRow({
-          ...row,
-          unit_price: targetPrice,
-          loose_rate: targetLoose,
-          rateSuggestionSource: newType === 'Wholesale' ? 'standard_wholesale' : 'standard_retail',
-        });
-      })
-    );
   };
 
   // Pre-indexed catalog for sub-millisecond local search across 10,000+ items
@@ -1149,13 +1110,22 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
   // Populate a datasheet row with a selected FastSearchItem + trigger Customer-Wise Item History lookup
   const populateRowWithItem = (rowIdx: number, item: FastSearchItem, focusQuantityAfter: boolean = true) => {
-    const defaultPrice =
-      invoiceType === 'Wholesale'
-        ? round2(item.wholesale_price || item.trade_price || item.retail_price)
+    const wholesaleRate =
+      Number(item.wholesale_price || 0) > 0
+        ? round2(item.wholesale_price)
+        : Number(item.trade_price || 0) > 0
+        ? round2(item.trade_price)
         : round2(item.retail_price);
+    const defaultPrice =
+      invoiceType === 'Wholesale' ? wholesaleRate : round2(item.retail_price);
     const calculatedLooseRate = round2(defaultPrice / Math.max(1, Number(item.units_per_pack || 1)));
     const defaultLooseRate = calculatedLooseRate;
     const batch = item.default_batch;
+    const isReplacingItem = Boolean(
+      rows[rowIdx]?.item_id !== null &&
+      Number(rows[rowIdx]?.item_id) > 0 &&
+      rows[rowIdx]?.item_id !== item.id
+    );
 
     setRows((prev) => {
       const updated = [...prev];
@@ -1163,18 +1133,33 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         updated.push(createEmptyRow());
       }
       const targetRow = updated[rowIdx] || createEmptyRow();
-      const preserveManual = targetRow.item_id === item.id && targetRow.isRateManuallyEdited;
-      const preserveManualLoose = targetRow.item_id === item.id && targetRow.isLooseRateManuallyEdited;
+      const hasExistingItem = targetRow.item_id !== null && Number(targetRow.item_id) > 0;
+      const isSameItem = targetRow.item_id === item.id;
+      const preserveManual = isSameItem && Boolean(targetRow.isRateManuallyEdited);
+      const preserveManualLoose = isSameItem && Boolean(targetRow.isLooseRateManuallyEdited);
       const effectivePrice = preserveManual ? targetRow.unit_price : defaultPrice;
       const effectiveLoose = preserveManualLoose
         ? targetRow.loose_rate
         : round2(effectivePrice / Math.max(1, Number(item.units_per_pack || 1)));
+
+      const preservedQty = hasExistingItem
+        ? Math.max(0, Number(targetRow.quantity || 0))
+        : Number(targetRow.quantity || 0) > 0
+        ? Math.max(0, Number(targetRow.quantity || 0))
+        : 0;
+
+      const preservedDiscount = hasExistingItem
+        ? Math.max(0, Math.min(100, Number(targetRow.discount_percent || 0)))
+        : Number(targetRow.discount_percent || 0) > 0
+        ? Math.max(0, Math.min(100, Number(targetRow.discount_percent || 0)))
+        : Number(item.discount_percent || 0);
 
       updated[rowIdx] = recalcRow({
         ...targetRow,
         item_id: item.id,
         inventory_id: batch.inventory_id,
         item_code: item.item_code,
+        barcode: item.barcode || '',
         company_name: item.company_name || '',
         item_name: item.item_name,
         packing: item.packing || '1x1',
@@ -1185,24 +1170,31 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         expiry_date: batch.expiry_date,
         available_stock_packs: batch.available_packs,
         available_stock_units: batch.available_units,
-        quantity: targetRow.item_id === item.id && targetRow.quantity > 0 ? targetRow.quantity : 0,
-        bonus_quantity: targetRow.item_id === item.id && Number(targetRow.bonus_quantity || 0) > 0 ? targetRow.bonus_quantity : 0,
+        quantity: preservedQty,
+        bonus_quantity: isSameItem && Number(targetRow.bonus_quantity || 0) > 0 ? targetRow.bonus_quantity : 0,
         unit_price: effectivePrice,
-        discount_percent: preserveManual ? targetRow.discount_percent : Number(item.discount_percent || 0),
-        loose_quantity: targetRow.item_id === item.id ? targetRow.loose_quantity || 0 : 0,
+        discount_percent: preservedDiscount,
+        loose_quantity: isSameItem ? targetRow.loose_quantity || 0 : 0,
         loose_rate: effectiveLoose,
         tax_percent: Number(item.tax_percent || 0),
         retail_price_ref: round2(item.retail_price),
-        wholesale_price_ref: round2(item.wholesale_price || item.trade_price || item.retail_price),
+        wholesale_price_ref: wholesaleRate,
         item_loose_rate_ref: defaultLooseRate,
         batches: item.batches || [],
-        isRateManuallyEdited: Boolean(preserveManual),
-        isLooseRateManuallyEdited: Boolean(preserveManualLoose),
+        isRateManuallyEdited: preserveManual,
+        isLooseRateManuallyEdited: preserveManualLoose,
         rateSuggestionSource: preserveManual
           ? 'manual'
           : invoiceType === 'Wholesale'
           ? 'standard_wholesale'
           : 'standard_retail',
+        lastPurchaseCostRate: Number(item.purchase_price || 0) > 0 ? round2(item.purchase_price) : null,
+        lastCustomerSaleRate: isSameItem ? targetRow.lastCustomerSaleRate : null,
+        lastCustomerDiscountPercent: isSameItem ? targetRow.lastCustomerDiscountPercent : null,
+        lastCustomerSaleDate: isSameItem ? targetRow.lastCustomerSaleDate : null,
+        lastCustomerInvoiceNo: isSameItem ? targetRow.lastCustomerInvoiceNo : null,
+        lastCustomerSoldQty: isSameItem ? targetRow.lastCustomerSoldQty : null,
+        previousCustomerSaleRateBeforeLast: isSameItem ? targetRow.previousCustomerSaleRateBeforeLast : null,
       });
       return ensureMinimumRows(updated);
     });
@@ -1216,8 +1208,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     setEditingItemCode(null);
     setEditingItemName(null);
 
-    // Fetch Customer-Specific Last Sale Rate, Discount, Date, Invoice#, and Last Purchase Cost
-    fetchAndApplyItemHistory(rowIdx, item.id, customerAccountId, invoiceType, true);
+    // Fetch Customer-Specific Last Sale Rate, Discount, Date, Invoice#, and Last Purchase Cost metadata
+    fetchAndApplyItemHistory(rowIdx, item.id, customerAccountId, invoiceType, !isReplacingItem);
 
     if (focusQuantityAfter) {
       const targetId =
@@ -2283,21 +2275,22 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }
   };
 
-  // Column Widths for Microsoft Access-Style Resizable Datasheet Grid (Wider Full-Screen Defaults)
+  // Column Widths for Microsoft Access-Style Resizable Datasheet Grid (Item Name kept strictly at 330px; all other columns sized compactly to fit headings)
   const [colWidths, setColWidths] = useState<Record<string, number>>({
-    selector: 42,
-    item_code: 120,
-    company: 160,
+    selector: 34,
+    item_code: 86,
     item_name: 330,
-    quantity: 95,
-    discount: 98,
-    loose_quantity: 112,
-    unit_price: 112,
-    bonus_quantity: 95,
-    loose_rate: 112,
-    gross_amount: 130,
-    amount: 140,
-    actions: 115,
+    quantity: 58,
+    discount: 76,
+    unit_price: 76,
+    loose_quantity: 84,
+    loose_rate: 90,
+    bonus_quantity: 64,
+    amount: 96,
+    last_purchase_price: 154,
+    company: 125,
+    gross_amount: 106,
+    actions: 112,
   });
 
   const handleColResizeMouseDown = (colKey: string, e: React.MouseEvent) => {
@@ -2323,17 +2316,16 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     window.addEventListener('mouseup', onMouseUp);
   };
 
-  // Keyboard Navigation in Access Datasheet Grid & POS View
-  // Required column sequence: 1. Item Code -> 2. Company -> 3. Item Name -> 4. Qty -> 5. Discount -> 6. Loose Qty -> 7. Price -> 8. Bonus -> 9. Loose Rate -> 10. Gross Amount -> 11. Net Amount
+  // Keyboard Navigation in Access Datasheet Grid (matches exact visual column order)
   const colOrder = [
     'item_code',
     'item_name',
     'quantity',
     'discount_percent',
-    'loose_quantity',
     'unit_price',
-    'bonus_quantity',
+    'loose_quantity',
     'loose_rate',
+    'bonus_quantity',
   ];
 
   // MS Access-style: only ONE blank "new record" row is active at a time.
@@ -2370,10 +2362,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       'item_name',
       'quantity',
       'discount_percent',
-      'loose_quantity',
       'unit_price',
-      'bonus_quantity',
+      'loose_quantity',
       'loose_rate',
+      'bonus_quantity',
     ];
   };
 
@@ -3280,7 +3272,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 <div className="inline-flex rounded p-0.5 bg-slate-100 border border-slate-300">
                   <button
                     type="button"
-                    onClick={() => setInvoiceType('Retail')}
+                    onClick={() => handleInvoiceTypeChange('Retail')}
                     className={`px-1.5 py-0 rounded font-bold cursor-pointer ${
                       invoiceType === 'Retail' ? 'bg-emerald-600 text-white' : 'text-slate-700'
                     }`}
@@ -3289,7 +3281,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => setInvoiceType('Wholesale')}
+                    onClick={() => handleInvoiceTypeChange('Wholesale')}
                     className={`px-1.5 py-0 rounded font-bold cursor-pointer ${
                       invoiceType === 'Wholesale' ? 'bg-blue-600 text-white' : 'text-slate-700'
                     }`}
@@ -4603,15 +4595,35 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
 
           {/* ================= SECTION B (CENTER): MICROSOFT ACCESS-STYLE DATASHEET GRID ONLY (MIN 10 VISIBLE ROWS) ================= */}
           <div className="ams-pos-item-grid-card flex flex-col flex-1 min-h-[356px] bg-white overflow-hidden select-none border-b border-slate-400">
-            {/* Vertical scrolling inside the item grid, sticky column headers */}
+            {/* Vertical & horizontal scrolling inside the item grid, sticky column headers */}
             <div className="ams-pos-item-grid-scroll flex-1 min-h-[322px] overflow-y-auto overflow-x-auto relative">
-              <table className="ams-compact-10-grid w-full border-collapse text-[11px] font-sans leading-none min-w-[1180px]">
+              <table
+                style={{
+                  width: `${
+                    colWidths.selector +
+                    colWidths.item_code +
+                    colWidths.item_name +
+                    colWidths.quantity +
+                    colWidths.discount +
+                    colWidths.unit_price +
+                    colWidths.loose_quantity +
+                    colWidths.loose_rate +
+                    colWidths.bonus_quantity +
+                    colWidths.amount +
+                    colWidths.last_purchase_price +
+                    colWidths.company +
+                    colWidths.gross_amount +
+                    colWidths.actions
+                  }px`,
+                }}
+                className="ams-compact-10-grid table-fixed border-collapse text-[11px] font-sans leading-none"
+              >
                 <thead className="sticky top-0 z-10 bg-slate-200 border-b border-slate-400 text-slate-800 text-[10px] font-bold select-none shadow-sm leading-none">
                   <tr className="h-6">
                     {/* Access Row Selector column */}
                     <th
                       style={{ width: `${colWidths.selector}px`, minWidth: `${colWidths.selector}px` }}
-                      className="bg-slate-300/80 border-r border-slate-400 px-1 py-0 text-center font-mono relative h-6"
+                      className="bg-slate-300/80 border-r border-slate-400 px-1 py-0 text-center font-mono relative h-6 whitespace-nowrap"
                     >
                       #
                       <div
@@ -4623,7 +4635,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     {/* 1. Item Code */}
                     <th
                       style={{ width: `${colWidths.item_code}px`, minWidth: `${colWidths.item_code}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-left relative h-6"
+                      className="border-r border-slate-300 px-1 py-0 text-left relative h-6 whitespace-nowrap"
                     >
                       Item Code
                       <div
@@ -4632,22 +4644,14 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       />
                     </th>
 
-                    {/* 2. Company */}
+                    {/* 2. Item Name (fixed width: 330px, wider than all other columns) */}
                     <th
-                      style={{ width: `${colWidths.company}px`, minWidth: `${colWidths.company}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-left relative h-6"
-                    >
-                      Company
-                      <div
-                        onMouseDown={(e) => handleColResizeMouseDown('company', e)}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
-                      />
-                    </th>
-
-                    {/* 3. Item Name */}
-                    <th
-                      style={{ width: `${colWidths.item_name}px`, minWidth: `${colWidths.item_name}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-left relative h-6"
+                      style={{
+                        width: `${colWidths.item_name}px`,
+                        minWidth: `${colWidths.item_name}px`,
+                        maxWidth: `${colWidths.item_name}px`,
+                      }}
+                      className="border-r border-slate-300 px-1 py-0 text-left relative h-6 whitespace-nowrap"
                     >
                       Item Name
                       <div
@@ -4656,10 +4660,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       />
                     </th>
 
-                    {/* 4. Qty */}
+                    {/* 3. Qty */}
                     <th
                       style={{ width: `${colWidths.quantity}px`, minWidth: `${colWidths.quantity}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-right bg-emerald-100/60 text-emerald-950 relative h-6"
+                      className="border-r border-slate-300 px-1 py-0 text-right bg-emerald-100/60 text-emerald-950 relative h-6 whitespace-nowrap"
                     >
                       Qty
                       <div
@@ -4668,10 +4672,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       />
                     </th>
 
-                    {/* 5. Discount */}
+                    {/* 4. Discount */}
                     <th
                       style={{ width: `${colWidths.discount}px`, minWidth: `${colWidths.discount}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-right relative h-6"
+                      className="border-r border-slate-300 px-1 py-0 text-right relative h-6 whitespace-nowrap"
                     >
                       Discount
                       <div
@@ -4680,22 +4684,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       />
                     </th>
 
-                    {/* 6. Loose Qty */}
-                    <th
-                      style={{ width: `${colWidths.loose_quantity}px`, minWidth: `${colWidths.loose_quantity}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-right bg-teal-100/60 text-teal-950 relative h-6"
-                    >
-                      Loose Qty
-                      <div
-                        onMouseDown={(e) => handleColResizeMouseDown('loose_quantity', e)}
-                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
-                      />
-                    </th>
-
-                    {/* 7. Price */}
+                    {/* 5. Price */}
                     <th
                       style={{ width: `${colWidths.unit_price}px`, minWidth: `${colWidths.unit_price}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-right relative h-6"
+                      className="border-r border-slate-300 px-1 py-0 text-right relative h-6 whitespace-nowrap"
                     >
                       Price
                       <div
@@ -4704,22 +4696,22 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       />
                     </th>
 
-                    {/* 8. Bonus */}
+                    {/* 6. Loose Qty */}
                     <th
-                      style={{ width: `${colWidths.bonus_quantity}px`, minWidth: `${colWidths.bonus_quantity}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-right bg-emerald-100/70 text-emerald-950 relative h-6"
+                      style={{ width: `${colWidths.loose_quantity}px`, minWidth: `${colWidths.loose_quantity}px` }}
+                      className="border-r border-slate-300 px-1 py-0 text-right bg-teal-100/60 text-teal-950 relative h-6 whitespace-nowrap"
                     >
-                      Bonus
+                      Loose Qty
                       <div
-                        onMouseDown={(e) => handleColResizeMouseDown('bonus_quantity', e)}
+                        onMouseDown={(e) => handleColResizeMouseDown('loose_quantity', e)}
                         className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
                       />
                     </th>
 
-                    {/* 9. Loose Rate */}
+                    {/* 7. Loose Rate */}
                     <th
                       style={{ width: `${colWidths.loose_rate}px`, minWidth: `${colWidths.loose_rate}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-right bg-blue-100/60 text-blue-950 relative h-6"
+                      className="border-r border-slate-300 px-1 py-0 text-right bg-blue-100/60 text-blue-950 relative h-6 whitespace-nowrap"
                     >
                       Loose Rate
                       <div
@@ -4728,22 +4720,22 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       />
                     </th>
 
-                    {/* 10. Gross Amount */}
+                    {/* 8. Bonus */}
                     <th
-                      style={{ width: `${colWidths.gross_amount}px`, minWidth: `${colWidths.gross_amount}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-right bg-slate-200/70 relative h-6"
+                      style={{ width: `${colWidths.bonus_quantity}px`, minWidth: `${colWidths.bonus_quantity}px` }}
+                      className="border-r border-slate-300 px-1 py-0 text-right bg-emerald-100/70 text-emerald-950 relative h-6 whitespace-nowrap"
                     >
-                      Gross Amount
+                      Bonus
                       <div
-                        onMouseDown={(e) => handleColResizeMouseDown('gross_amount', e)}
+                        onMouseDown={(e) => handleColResizeMouseDown('bonus_quantity', e)}
                         className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
                       />
                     </th>
 
-                    {/* 11. Net Amount */}
+                    {/* 9. Net Amount */}
                     <th
                       style={{ width: `${colWidths.amount}px`, minWidth: `${colWidths.amount}px` }}
-                      className="border-r border-slate-300 px-1 py-0 text-right bg-slate-300/60 font-black relative h-6"
+                      className="border-r border-slate-300 px-1 py-0 text-right bg-slate-300/60 font-black relative h-6 whitespace-nowrap"
                     >
                       Net Amount
                       <div
@@ -4752,10 +4744,49 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                       />
                     </th>
 
-                    {/* Actions / Batch */}
+                    {/* 10. Last Purchase Price */}
+                    <th
+                      style={{
+                        width: `${colWidths.last_purchase_price}px`,
+                        minWidth: `${colWidths.last_purchase_price}px`,
+                      }}
+                      className="border-r border-slate-300 px-1 py-0 text-right bg-amber-50/70 text-amber-950 relative h-6 whitespace-nowrap"
+                    >
+                      Last Purchase Price
+                      <div
+                        onMouseDown={(e) => handleColResizeMouseDown('last_purchase_price', e)}
+                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
+                      />
+                    </th>
+
+                    {/* 11. Company */}
+                    <th
+                      style={{ width: `${colWidths.company}px`, minWidth: `${colWidths.company}px` }}
+                      className="border-r border-slate-300 px-1 py-0 text-left relative h-6 whitespace-nowrap"
+                    >
+                      Company
+                      <div
+                        onMouseDown={(e) => handleColResizeMouseDown('company', e)}
+                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
+                      />
+                    </th>
+
+                    {/* 12. Gross Amount */}
+                    <th
+                      style={{ width: `${colWidths.gross_amount}px`, minWidth: `${colWidths.gross_amount}px` }}
+                      className="border-r border-slate-300 px-1 py-0 text-right bg-slate-200/70 relative h-6 whitespace-nowrap"
+                    >
+                      Gross Amount
+                      <div
+                        onMouseDown={(e) => handleColResizeMouseDown('gross_amount', e)}
+                        className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-emerald-600"
+                      />
+                    </th>
+
+                    {/* 13. Batch / Del */}
                     <th
                       style={{ width: `${colWidths.actions}px`, minWidth: `${colWidths.actions}px` }}
-                      className="px-1 py-0 text-center relative h-6"
+                      className="px-1 py-0 text-center relative h-6 whitespace-nowrap"
                     >
                       Batch / Del
                       <div
@@ -4773,7 +4804,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           <td className="border-r border-slate-300 px-0.5 py-0 text-center bg-slate-100 font-mono text-[9.5px] text-slate-300 h-[16px] align-middle">
                             {rIdx + 1}
                           </td>
-                          <td colSpan={12} />
+                          <td colSpan={13} />
                         </tr>
                       );
                     }
@@ -4783,6 +4814,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     const remainingUnits = round2(row.available_stock_units - row.total_units);
                     const isOverStock =
                       row.item_id !== null && !allowNegativeStock && remainingUnits < 0;
+                    const catPurchaseFallback =
+                      row.item_id && (row.lastPurchaseCostRate === null || row.lastPurchaseCostRate === undefined)
+                        ? Number(catalogItems.find((c) => c.id === row.item_id)?.purchase_price || 0)
+                        : Number(row.lastPurchaseCostRate || 0);
 
                     return (
                       <tr
@@ -4865,15 +4900,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           />
                         </td>
 
-                        {/* 2. Company */}
-                        <td
-                          className="border-r border-slate-300 px-1 py-0 text-slate-700 truncate text-[10px] h-[16px] align-middle max-w-[130px]"
-                          title={row.company_name}
-                        >
-                          {row.company_name || ''}
-                        </td>
-
-                        {/* 3. Item Name (Live searchable while typing; clicking/focusing never opens popup or modifies/deletes item) */}
+                        {/* 2. Item Name (Fixed 330px column; live searchable while typing) */}
                         <td className="border-r border-slate-300 p-0 h-[16px] align-middle relative">
                           <input
                             id={`cell_${rIdx}_item_name`}
@@ -4910,12 +4937,12 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             }}
                             onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'item_name')}
                             placeholder="Type Item Name / Code (or F2)..."
-                            className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-semibold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                            className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-semibold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none truncate"
                           />
                           {renderSalesExcelItemCombobox('row', rIdx)}
                         </td>
 
-                        {/* 4. Qty */}
+                        {/* 3. Qty */}
                         <td className="border-r border-slate-300 p-0 bg-emerald-50/20 h-[16px] align-middle">
                           <NumericInput
                             id={`cell_${rIdx}_quantity`}
@@ -4927,7 +4954,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           />
                         </td>
 
-                        {/* 5. Discount */}
+                        {/* 4. Discount */}
                         <td className="border-r border-slate-300 p-0 h-[16px] align-middle">
                           <NumericInput
                             id={`cell_${rIdx}_discount_percent`}
@@ -4936,6 +4963,18 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             onChange={(e) => updateRowField(rIdx, 'discount_percent', e.target.value)}
                             onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'discount_percent')}
                             className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                          />
+                        </td>
+
+                        {/* 5. Price */}
+                        <td className="border-r border-slate-300 p-0 h-[16px] align-middle">
+                          <NumericInput
+                            id={`cell_${rIdx}_unit_price`}
+                            value={row.unit_price}
+                            onFocus={() => setSelectedRowIndex(rIdx)}
+                            onChange={(e) => updateRowField(rIdx, 'unit_price', e.target.value)}
+                            onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'unit_price')}
+                            className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
                           />
                         </td>
 
@@ -4977,15 +5016,17 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                           )}
                         </td>
 
-                        {/* 7. Price */}
-                        <td className="border-r border-slate-300 p-0 h-[16px] align-middle">
+                        {/* 7. Loose Rate */}
+                        <td className="border-r border-slate-300 p-0 bg-blue-50/20 h-[16px] align-middle">
                           <NumericInput
-                            id={`cell_${rIdx}_unit_price`}
-                            value={row.unit_price}
+                            id={`cell_${rIdx}_loose_rate`}
+                            disabled={isSyrupItem(row)}
+                            value={row.loose_rate}
                             onFocus={() => setSelectedRowIndex(rIdx)}
-                            onChange={(e) => updateRowField(rIdx, 'unit_price', e.target.value)}
-                            onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'unit_price')}
-                            className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
+                            onChange={(e) => updateRowField(rIdx, 'loose_rate', e.target.value)}
+                            onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'loose_rate')}
+                            className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono font-bold text-blue-950 bg-transparent text-[11px] h-[15px] leading-none outline-none disabled:opacity-40"
+                            title="Loose Rate per unit"
                           />
                         </td>
 
@@ -4998,35 +5039,34 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             onChange={(e) => updateRowField(rIdx, 'bonus_quantity', e.target.value)}
                             onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'bonus_quantity')}
                             className="w-full px-1 py-0 border border-transparent focus:border-emerald-600 focus:bg-white text-right font-mono font-bold text-emerald-950 bg-transparent text-[11px] h-[15px] leading-none outline-none"
-                            title="Bonus Quantity (Free items deducted from stock)"
+                            title="Bonus Quantity (Press Enter to add next item row)"
                           />
                         </td>
 
-                        {/* 9. Loose Rate */}
-                        <td className="border-r border-slate-300 p-0 bg-blue-50/20 h-[16px] align-middle">
-                          <NumericInput
-                            id={`cell_${rIdx}_loose_rate`}
-                            disabled={isSyrupItem(row)}
-                            value={row.loose_rate}
-                            onFocus={() => setSelectedRowIndex(rIdx)}
-                            onChange={(e) => updateRowField(rIdx, 'loose_rate', e.target.value)}
-                            onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'loose_rate')}
-                            className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono font-bold text-blue-950 bg-transparent text-[11px] h-[15px] leading-none outline-none disabled:opacity-40"
-                            title="Loose Rate per unit (Press Enter to add next item row)"
-                          />
-                        </td>
-
-                        {/* 10. Gross Amount */}
-                        <td className="border-r border-slate-300 px-1 py-0 text-right font-mono font-semibold text-slate-700 bg-slate-50/30 text-[11px] h-[16px] align-middle">
-                          {row.gross_amount > 0 ? row.gross_amount.toFixed(2) : ''}
-                        </td>
-
-                        {/* 11. Net Amount */}
+                        {/* 9. Net Amount */}
                         <td className="border-r border-slate-300 px-1 py-0 text-right font-mono font-black text-slate-900 bg-slate-50/60 text-[11px] h-[16px] align-middle">
                           {row.line_total > 0 ? row.line_total.toFixed(2) : ''}
                         </td>
 
-                        {/* Batch / Del */}
+                        {/* 10. Last Purchase Price */}
+                        <td className="border-r border-slate-300 px-1 py-0 text-right font-mono font-semibold text-amber-900 bg-amber-50/30 text-[11px] h-[16px] align-middle">
+                          {catPurchaseFallback > 0 ? catPurchaseFallback.toFixed(2) : ''}
+                        </td>
+
+                        {/* 11. Company */}
+                        <td
+                          className="border-r border-slate-300 px-1 py-0 text-slate-700 truncate text-[10px] h-[16px] align-middle"
+                          title={row.company_name}
+                        >
+                          {row.company_name || ''}
+                        </td>
+
+                        {/* 12. Gross Amount */}
+                        <td className="border-r border-slate-300 px-1 py-0 text-right font-mono font-semibold text-slate-700 bg-slate-50/30 text-[11px] h-[16px] align-middle">
+                          {row.gross_amount > 0 ? row.gross_amount.toFixed(2) : ''}
+                        </td>
+
+                        {/* 13. Batch / Del */}
                         <td className="px-1 py-0 text-center h-[16px] align-middle">
                           <div className="flex items-center justify-center gap-0.5 h-[15px]">
                             {row.batches && row.batches.length > 0 ? (
@@ -5036,7 +5076,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                                 onFocus={() => setSelectedRowIndex(rIdx)}
                                 onChange={(e) => updateRowField(rIdx, 'batch_number', e.target.value)}
                                 onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'batch_number')}
-                                className="w-15 px-0.5 py-0 border border-slate-300 rounded-lg font-mono text-[8.5px] bg-white h-[14px]"
+                                className="w-14 px-0.5 py-0 border border-slate-300 rounded-lg font-mono text-[8.5px] bg-white h-[14px]"
                                 title={`Packing: ${row.packing || '1x1'} | Select Batch`}
                               >
                                 {row.batches.map((b) => (
@@ -5047,7 +5087,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                               </select>
                             ) : (
                               <span
-                                className="text-[9px] font-mono text-slate-500 w-15 truncate"
+                                className="text-[9px] font-mono text-slate-500 w-14 truncate"
                                 title={row.packing ? `Packing: ${row.packing}` : ''}
                               >
                                 {row.batch_number || row.packing || ''}
@@ -6254,7 +6294,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           setShowItemListModal(false);
           setItemListTargetRowIdx(null);
 
-          const alreadyExists = rows.some((r) => r.item_id === chosen.id);
+          const alreadyExists = rows.some(
+            (r, idx) => (targetIdx !== null ? idx !== targetIdx : true) && r.item_id === chosen.id
+          );
           if (alreadyExists) {
             setPendingDuplicatePrompt({
               item: chosen,

@@ -60,6 +60,7 @@ export interface DatasheetRow {
   item_id: number | null;
   inventory_id: number | null;
   item_code: string;
+  barcode?: string;
   company_name: string;
   item_name: string;
   packing: string;
