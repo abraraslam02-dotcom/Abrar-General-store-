@@ -2,20 +2,42 @@ import React, { useState, useEffect, useRef } from 'react';
 
 export interface NumericInputProps extends Omit<React.InputHTMLAttributes<HTMLInputElement>, 'type'> {
   allowNegative?: boolean;
+  displayZero?: boolean;
 }
 
-function formatPropToDisplay(val: unknown): string {
-  if (val === null || val === undefined || val === '') return '';
+function formatPropToDisplay(val: unknown, displayZero = false): string {
+  if (val === null || val === undefined || val === '') {
+    return displayZero ? '0' : '';
+  }
   const str = String(val).trim();
-  if (str === '' || str === '0' || str === '0.0' || str === '0.00') return '';
+  if (str === '' || str === '0' || str === '0.0' || str === '0.00') {
+    return displayZero ? '0' : '';
+  }
   const num = Number(str);
-  if (!Number.isFinite(num) || num === 0) return '';
+  if (!Number.isFinite(num) || num === 0) {
+    return displayZero ? '0' : '';
+  }
   return str;
 }
 
 export const NumericInput = React.forwardRef<HTMLInputElement, NumericInputProps>(
-  ({ value, onChange, onFocus, onBlur, placeholder, allowNegative = false, required: _required, ...rest }, ref) => {
-    const [textValue, setTextValue] = useState<string>(() => formatPropToDisplay(value));
+  (
+    {
+      value,
+      onChange,
+      onFocus,
+      onBlur,
+      placeholder,
+      allowNegative = false,
+      displayZero = false,
+      required: _required,
+      ...rest
+    },
+    ref
+  ) => {
+    const [textValue, setTextValue] = useState<string>(() =>
+      formatPropToDisplay(value, displayZero)
+    );
     const isFocusedRef = useRef<boolean>(false);
     const initialNum = Number(value || 0);
     const lastEmittedNumRef = useRef<number>(Number.isFinite(initialNum) ? initialNum : 0);
@@ -26,9 +48,9 @@ export const NumericInput = React.forwardRef<HTMLInputElement, NumericInputProps
 
       if (!isFocusedRef.current || safeIncomingNum !== lastEmittedNumRef.current) {
         lastEmittedNumRef.current = safeIncomingNum;
-        setTextValue(formatPropToDisplay(value));
+        setTextValue(formatPropToDisplay(value, displayZero));
       }
-    }, [value]);
+    }, [value, displayZero]);
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
       const raw = e.target.value;
@@ -55,7 +77,7 @@ export const NumericInput = React.forwardRef<HTMLInputElement, NumericInputProps
       isFocusedRef.current = false;
       const num = textValue.trim() === '' ? 0 : Number(textValue);
       if (!Number.isFinite(num) || num === 0) {
-        setTextValue('');
+        setTextValue(displayZero ? '0' : '');
         lastEmittedNumRef.current = 0;
       } else {
         const cleanStr = String(num);
@@ -68,7 +90,9 @@ export const NumericInput = React.forwardRef<HTMLInputElement, NumericInputProps
     };
 
     const cleanPlaceholder =
-      placeholder === '0' || placeholder === '0.0' || placeholder === '0.00' ? '' : placeholder;
+      !displayZero && (placeholder === '0' || placeholder === '0.0' || placeholder === '0.00')
+        ? ''
+        : placeholder;
 
     return (
       <input

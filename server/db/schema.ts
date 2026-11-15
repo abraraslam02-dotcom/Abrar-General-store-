@@ -221,6 +221,7 @@ CREATE TABLE IF NOT EXISTS sales (
     invoice_date TEXT NOT NULL,
     customer_account_id INTEGER,
     customer_name TEXT NOT NULL DEFAULT 'Walk-in Cash Customer',
+    buyer_name TEXT NOT NULL DEFAULT '',
     customer_filer_status TEXT NOT NULL DEFAULT 'Non-Filer' CHECK(customer_filer_status IN ('Filer', 'Non-Filer', 'Exempt')),
     salesman TEXT NOT NULL DEFAULT 'Counter Pharmacist',
     invoice_type TEXT NOT NULL DEFAULT 'Retail' CHECK(invoice_type IN ('Retail', 'Wholesale')),

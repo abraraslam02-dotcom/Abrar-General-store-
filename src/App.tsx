@@ -9,6 +9,7 @@ import { AdvanceTaxSettingsPanel } from './components/purchases/AdvanceTaxSettin
 import { SalesInvoiceDatasheet } from './components/sales/SalesInvoiceDatasheet';
 import { SalesRegisterView } from './components/sales/SalesRegisterView';
 import { SalesReturnView } from './components/sales/SalesReturnView';
+import { InvoiceLookupView } from './components/common/InvoiceLookupView';
 import { AccountLedgersView } from './components/sales/AccountLedgersView';
 import { PaymentsWorkspaceView } from './components/sales/PaymentsWorkspaceView';
 import { SalesReportsView } from './components/sales/SalesReportsView';
@@ -83,6 +84,7 @@ function AppContent() {
   const [hasVisitedSales, setHasVisitedSales] = useState<boolean>(false);
   const [hasVisitedPurchases, setHasVisitedPurchases] = useState<boolean>(false);
   const [resumeInvoiceId, setResumeInvoiceId] = useState<number | null>(null);
+  const [resumePurchaseId, setResumePurchaseId] = useState<number | null>(null);
   const [hasUnsavedInvoiceItems, setHasUnsavedInvoiceItems] = useState<boolean>(false);
   const [quickShortcut, setQuickShortcut] = useState<QuickShortcutAction | null>(null);
 
@@ -174,13 +176,24 @@ function AppContent() {
       ) {
         return hasPermission('accounts') || (tab === 'staff-salesmen' && hasPermission('sales'));
       }
-      if (tab === 'sales' || tab === 'sales-new' || tab === 'sales-pos' || tab === 'sales-register') {
+      if (
+        tab === 'sales' ||
+        tab === 'sales-new' ||
+        tab === 'sales-pos' ||
+        tab === 'sales-register' ||
+        tab === 'sales-lookup'
+      ) {
         return hasPermission('sales');
       }
       if (tab === 'sales-return' || tab === 'sale-returns') {
         return hasPermission('sale_returns');
       }
-      if (tab === 'purchases' || tab === 'purchases-bill' || tab === 'purchase-history') {
+      if (
+        tab === 'purchases' ||
+        tab === 'purchases-bill' ||
+        tab === 'purchase-history' ||
+        tab === 'purchase-lookup'
+      ) {
         return hasPermission('purchases');
       }
       if (tab === 'purchase-returns' || tab === 'purchases-return') {
@@ -323,6 +336,11 @@ function AppContent() {
     setActiveTab('sales-pos');
   };
 
+  const handleOpenPurchaseFromLookup = (id: number) => {
+    setResumePurchaseId(id);
+    setActiveTab('purchases-bill');
+  };
+
   // Determine view title & breadcrumbs
   const getHeaderInfo = (): { title: string; crumbs: string[] } => {
     switch (activeTab) {
@@ -406,6 +424,8 @@ function AppContent() {
         return { title: 'Sales Return — Invoice-Linked Medicine Return & Stock Restoration', crumbs: ['Sales Management', 'Sales Return'] };
       case 'sales-register':
         return { title: 'Sales History — Confirmed Invoices & Reprint Center', crumbs: ['Sales Management', 'Sales History'] };
+      case 'sales-lookup':
+        return { title: 'Sales Lookup — Multi-Criteria Invoice & Item Search', crumbs: ['Sales Management', 'Lookup'] };
       case 'sales-reports':
       case 'report-monthly-sales':
         return { title: 'Sales Reports — Comprehensive Sales & Revenue Analytics', crumbs: ['Sales Management', 'Sales Reports'] };
@@ -436,6 +456,8 @@ function AppContent() {
         return { title: 'Purchase Return — Supplier Debit Notes & Tax Adjustments', crumbs: ['Purchase Management', 'Purchase Return'] };
       case 'purchase-history':
         return { title: 'Purchase History — Confirmed Supplier Bills & Register', crumbs: ['Purchase Management', 'Purchase History'] };
+      case 'purchase-lookup':
+        return { title: 'Purchase Lookup — Multi-Criteria Invoice & Item Search', crumbs: ['Purchase Management', 'Lookup'] };
       case 'purchase-reports':
         return { title: 'Purchase Reports — Supplier, Item & Tax Analytics', crumbs: ['Purchase Management', 'Purchase Reports'] };
       case 'purchase-supplier-report':
@@ -920,6 +942,14 @@ function AppContent() {
                 />
               )}
 
+              {activeTab === 'sales-lookup' && (
+                <InvoiceLookupView
+                  defaultScope="sales"
+                  onOpenSalesInvoice={handleResumeFromRegister}
+                  onOpenPurchaseInvoice={handleOpenPurchaseFromLookup}
+                />
+              )}
+
               {activeTab === 'sales-held' && (
                 <SalesRegisterView mode="held_or_draft" onResumeInvoice={handleResumeFromRegister} />
               )}
@@ -1137,6 +1167,8 @@ function AppContent() {
                 <div className={isPurchaseInvoiceTab ? 'flex-1 w-full h-full flex flex-col min-h-0 overflow-hidden' : 'hidden'}>
                   <PurchasesWorkspaceView
                     initialSubTab="new-invoice"
+                    resumePurchaseId={resumePurchaseId}
+                    onClearResume={() => setResumePurchaseId(null)}
                     onBackToDashboard={handleCloseFullScreenInvoice}
                   />
                 </div>
@@ -1151,6 +1183,13 @@ function AppContent() {
                 <PurchasesWorkspaceView
                   initialSubTab="register"
                   onBackToDashboard={handleCloseFullScreenInvoice}
+                />
+              )}
+              {activeTab === 'purchase-lookup' && (
+                <InvoiceLookupView
+                  defaultScope="purchase"
+                  onOpenSalesInvoice={handleResumeFromRegister}
+                  onOpenPurchaseInvoice={handleOpenPurchaseFromLookup}
                 />
               )}
               {(activeTab === 'purchase-reports' ||

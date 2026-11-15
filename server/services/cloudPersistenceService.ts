@@ -1543,17 +1543,18 @@ export function hydrateSqliteFromCloudRecords(
         const res = db
           .prepare(
             `INSERT OR IGNORE INTO sales (
-              invoice_number, invoice_date, customer_account_id, customer_name,
+              invoice_number, invoice_date, customer_account_id, customer_name, buyer_name,
               invoice_type, payment_mode, gross_total, discount_amount,
               taxable_amount, gst_amount, tax_amount, net_total,
               paid_amount, balance_amount, status, remarks, client_request_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           )
           .run(
             invNo,
             String(s.invoice_date || new Date().toISOString().slice(0, 10)),
             s.customer_account_id || null,
             String(s.customer_name || 'Walk-in Cash Customer'),
+            String(s.buyer_name || ''),
             String(s.invoice_type || 'Cash'),
             String(s.payment_mode || 'Cash'),
             Number(s.gross_total || s.net_total || 0),

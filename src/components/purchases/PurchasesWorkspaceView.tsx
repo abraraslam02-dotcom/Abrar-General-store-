@@ -58,6 +58,7 @@ import { NumericInput } from '../common/NumericInput';
 import { exportPurchaseInvoicesToExcel } from '../../utils/invoiceExcelExport';
 import { InvoiceSmsModal } from '../common/InvoiceSmsModal';
 import { ItemListSelectionModal } from '../common/ItemListSelectionModal';
+import { DuplicateItemConfirmModal } from '../common/DuplicateItemConfirmModal';
 import {
   InvoiceRecordSearchInput,
   InvoiceSearchableItem,
@@ -74,6 +75,8 @@ export type PurchaseSubTab =
 
 interface PurchasesWorkspaceViewProps {
   initialSubTab?: PurchaseSubTab;
+  resumePurchaseId?: number | null;
+  onClearResume?: () => void;
   onBackToDashboard?: () => void;
 }
 
@@ -194,6 +197,8 @@ export function findNextBlankPurchaseRowIndex(
 
 export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   initialSubTab = 'new-invoice',
+  resumePurchaseId,
+  onClearResume,
   onBackToDashboard,
 }) => {
   const [subTab, setSubTab] = useState<PurchaseSubTab>(initialSubTab);
@@ -334,6 +339,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const suppressItemListReopenRef = useRef<boolean>(false);
   const purchaseItemListOriginRef = useRef<'pos_row' | 'access_row' | 'top'>('top');
   const lastPurchaseItemListTriggerElIdRef = useRef<string | null>(null);
+  const [pendingDuplicatePrompt, setPendingDuplicatePrompt] = useState<{
+    item: Item;
+    clearRowIdx: number | null;
+  } | null>(null);
 
   useEffect(() => {
     setPurchaseRecordJumpInput(String(selectedPurchaseLineIndex + 1));
@@ -420,8 +429,17 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           if (parsed.supplierInvoiceNumber) setSupplierInvoiceNumber(String(parsed.supplierInvoiceNumber));
           if (parsed.supplierFilerStatus) setSupplierFilerStatus(parsed.supplierFilerStatus);
           if (parsed.billDate) setBillDate(String(parsed.billDate));
+          if (parsed.paymentMode) setPaymentMode(parsed.paymentMode);
           if (parsed.notes) setNotes(String(parsed.notes));
           if (parsed.invoiceDiscountPercent) setInvoiceDiscountPercent(Number(parsed.invoiceDiscountPercent));
+          if (parsed.paidAmount !== undefined && parsed.paidAmount !== null) {
+            setPaidAmount(Math.max(0, Number(parsed.paidAmount) || 0));
+            setPaidAmountManuallyEdited(
+              parsed.paidAmountManuallyEdited !== undefined
+                ? Boolean(parsed.paidAmountManuallyEdited)
+                : true
+            );
+          }
         }
       }
     } catch {
@@ -436,7 +454,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     if (!draftRestored || editingPurchaseId) return;
     try {
       const hasItems = lines.some((l) => l.item_id > 0);
-      if (hasItems || supplierInvoiceNumber || notes) {
+      if (hasItems || supplierInvoiceNumber || notes || paidAmountManuallyEdited) {
         localStorage.setItem(
           ACTIVE_PURCHASE_DRAFT_KEY,
           JSON.stringify({
@@ -446,6 +464,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
             supplierFilerStatus,
             billDate,
             paymentMode,
+            paidAmount,
+            paidAmountManuallyEdited,
             notes,
             invoiceDiscountPercent,
           })
@@ -463,6 +483,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     supplierFilerStatus,
     billDate,
     paymentMode,
+    paidAmount,
+    paidAmountManuallyEdited,
     notes,
     invoiceDiscountPercent,
   ]);
@@ -1298,31 +1320,11 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     focusTargetElementById(prompt.nextFocusTargetId);
   };
 
-  // Populate a specific row with an Item (used by Item Selection List modal & inline cells, preventing unnecessary duplicates)
-  const populatePurchaseRowWithItem = (idx: number, found: Item, _fromPosRow: boolean = true) => {
-    const existingDuplicateIdx = lines.findIndex((l, i) => i !== idx && l.item_id === found.id);
-    if (existingDuplicateIdx >= 0) {
-      // Clear current row if it was empty and jump to the already-added item's Quantity field
-      setLines((prev) => {
-        const copy = [...prev];
-        if (!copy[idx]?.item_id || copy[idx].item_id === 0) {
-          copy[idx] = createBlankPurchaseLine();
-        }
-        return copy;
-      });
-      setSelectedPurchaseLineIndex(existingDuplicateIdx);
-      setActiveRowItemSearchIdx(null);
-      setActiveRowItemSearchField(null);
-      setRowItemSearchQuery('');
-      setPurchaseSearchQuery('');
-      setShowPurchaseSearchDropdown(false);
-      setTimeout(() => {
-        const prefix = purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell';
-        focusPurchaseCell(existingDuplicateIdx, 'quantity', prefix);
-      }, 35);
-      return;
-    }
-
+  const applyItemToPurchaseRow = (
+    idx: number,
+    found: Item,
+    focusQty: boolean = true
+  ) => {
     setLines((prev) => {
       const copy = [...prev];
       const existingSameItem = copy[idx]?.item_id === found.id ? copy[idx] : undefined;
@@ -1338,10 +1340,111 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setRowItemSearchQuery('');
     setPurchaseSearchQuery('');
     setShowPurchaseSearchDropdown(false);
-    setTimeout(() => {
-      const prefix = purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell';
-      focusPurchaseCell(idx, 'quantity', prefix);
-    }, 35);
+    setItemHighlightIndex(0);
+    if (focusQty) {
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          const prefix = purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell';
+          focusPurchaseCell(idx, 'quantity', prefix);
+        }, 25);
+      });
+    }
+  };
+
+  // Populate a specific row with an Item (prompts on duplicate before adding in a new row)
+  const populatePurchaseRowWithItem = (idx: number, found: Item, _fromPosRow: boolean = true) => {
+    const hasDuplicate = lines.some((l, i) => i !== idx && l.item_id === found.id);
+    if (hasDuplicate) {
+      const isRowEmpty = !lines[idx]?.item_id || lines[idx].item_id === 0;
+      if (isRowEmpty) {
+        setLines((prev) => {
+          const copy = [...prev];
+          if (!copy[idx]?.item_id || copy[idx].item_id === 0) {
+            copy[idx] = createBlankPurchaseLine();
+          }
+          return copy;
+        });
+      }
+      setActiveRowItemSearchIdx(null);
+      setActiveRowItemSearchField(null);
+      setRowItemSearchQuery('');
+      setPurchaseSearchQuery('');
+      setShowPurchaseSearchDropdown(false);
+      setItemHighlightIndex(0);
+      setPendingDuplicatePrompt({
+        item: found,
+        clearRowIdx: isRowEmpty ? idx : null,
+      });
+      return;
+    }
+
+    applyItemToPurchaseRow(idx, found, true);
+  };
+
+  const handleConfirmAddDuplicatePurchaseRow = () => {
+    if (!pendingDuplicatePrompt) return;
+    const { item, clearRowIdx } = pendingDuplicatePrompt;
+    setPendingDuplicatePrompt(null);
+
+    let targetIdx = lines.length;
+    if (
+      clearRowIdx !== null &&
+      (!lines[clearRowIdx]?.item_id || lines[clearRowIdx].item_id === 0)
+    ) {
+      targetIdx = clearRowIdx;
+    } else {
+      const emptyIdx = lines.findIndex((l) => !l.item_id || l.item_id === 0);
+      targetIdx = emptyIdx >= 0 ? emptyIdx : lines.length;
+    }
+
+    setLines((prev) => {
+      const next = [...prev];
+      while (next.length <= targetIdx) {
+        next.push(createBlankPurchaseLine());
+      }
+      next[targetIdx] = buildPopulatedLineFromItem(item);
+      return ensureMinimumPurchaseRows(next, visibleRowCapacityRef.current, targetIdx);
+    });
+    setSelectedPurchaseLineIndex(targetIdx);
+    setPurchaseSearchQuery('');
+    setRowItemSearchQuery('');
+    setActiveRowItemSearchIdx(null);
+    setActiveRowItemSearchField(null);
+    setShowPurchaseSearchDropdown(false);
+    setItemHighlightIndex(0);
+
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        const prefix = purchaseViewMode === 'pos' ? 'pos_row' : 'pur_cell';
+        focusPurchaseCell(targetIdx, 'quantity', prefix);
+      }, 30);
+    });
+  };
+
+  const handleCancelDuplicatePurchasePrompt = () => {
+    const clearRowIdx = pendingDuplicatePrompt?.clearRowIdx ?? null;
+    setPendingDuplicatePrompt(null);
+    if (clearRowIdx !== null) {
+      setLines((prev) => {
+        const copy = [...prev];
+        if (!copy[clearRowIdx]?.item_id || copy[clearRowIdx].item_id === 0) {
+          copy[clearRowIdx] = createBlankPurchaseLine();
+        }
+        return copy;
+      });
+    }
+    setPurchaseSearchQuery('');
+    setRowItemSearchQuery('');
+    setActiveRowItemSearchIdx(null);
+    setActiveRowItemSearchField(null);
+    setShowPurchaseSearchDropdown(false);
+    setItemHighlightIndex(0);
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        itemSearchInputRef.current?.focus();
+        itemSearchInputRef.current?.select?.();
+      }, 25);
+    });
   };
 
   const openPurchaseItemListForRow = (
@@ -1375,6 +1478,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         const el = document.getElementById(triggerElId) as HTMLInputElement | null;
         el?.focus();
       }, 10);
+    } else {
+      setTimeout(() => {
+        itemSearchInputRef.current?.focus();
+      }, 10);
     }
     setTimeout(() => {
       suppressItemListReopenRef.current = false;
@@ -1392,21 +1499,35 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setShowPurchaseItemListModal(false);
     setPurchaseItemListTargetRowIdx(null);
 
+    const hasDuplicate = lines.some(
+      (l, i) => (targetRowIdx !== null ? i !== targetRowIdx : true) && l.item_id === chosen.id
+    );
+    if (hasDuplicate) {
+      const isTargetEmpty =
+        targetRowIdx !== null && (!lines[targetRowIdx]?.item_id || lines[targetRowIdx].item_id === 0);
+      if (isTargetEmpty && targetRowIdx !== null) {
+        setLines((prev) => {
+          const copy = [...prev];
+          copy[targetRowIdx] = createBlankPurchaseLine();
+          return copy;
+        });
+      }
+      setPendingDuplicatePrompt({
+        item: chosen,
+        clearRowIdx: isTargetEmpty ? targetRowIdx : null,
+      });
+      return;
+    }
+
     if (targetRowIdx !== null) {
       const fromPosRow = purchaseViewMode === 'pos' && origin === 'pos_row';
       populatePurchaseRowWithItem(targetRowIdx, chosen, fromPosRow);
       return;
     }
 
-    const existingDuplicateIdx = lines.findIndex((l) => l.item_id === chosen.id);
     const emptyIdx = lines.findIndex((l) => !l.item_id || l.item_id === 0);
-    const rowIdxToFill =
-      existingDuplicateIdx >= 0
-        ? existingDuplicateIdx
-        : emptyIdx >= 0
-        ? emptyIdx
-        : lines.length;
-    populatePurchaseRowWithItem(rowIdxToFill, chosen, false);
+    const rowIdxToFill = emptyIdx >= 0 ? emptyIdx : lines.length;
+    applyItemToPurchaseRow(rowIdxToFill, chosen, true);
   };
 
   const handleLineChange = (
@@ -1565,19 +1686,14 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   // Finds the first empty row in the datasheet (or appends a new row if items are already added),
   // NEVER replaces any existing item row, selects the newly added row, and focuses back on Item Search!
   const handleSelectPurchaseSearchItem = (it: Item) => {
-    const existingDuplicateIdx = lines.findIndex((l) => l.item_id === it.id);
-    if (existingDuplicateIdx >= 0) {
-      setSelectedPurchaseLineIndex(existingDuplicateIdx);
+    const hasDuplicate = lines.some((l) => l.item_id === it.id);
+    if (hasDuplicate) {
       setPurchaseSearchQuery('');
       setRowItemSearchQuery('');
       setActiveRowItemSearchIdx(null);
       setItemHighlightIndex(0);
       setShowPurchaseSearchDropdown(false);
-      // Requirement 9: Automatically focus the search field for the next item
-      setTimeout(() => {
-        itemSearchInputRef.current?.focus();
-        itemSearchInputRef.current?.select?.();
-      }, 25);
+      setPendingDuplicatePrompt({ item: it, clearRowIdx: null });
       return;
     }
 
@@ -2147,7 +2263,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       setTaxOverrideAuthorizedBy(p.tax_override_authorized_by || 'Chief Pharmacist / Admin');
       setPaymentMode(p.payment_mode || 'Credit');
       setPaymentAccountId(p.payment_account_id ? String(p.payment_account_id) : '');
-      setPaidAmount(Number(p.paid_amount || 0));
+      setPaidAmount(Math.max(0, Number(p.paid_amount ?? 0)));
+      setPaidAmountManuallyEdited(true);
 
       const loadedItems: PurchaseLineItem[] = (res.items || []).map((it: any) => {
         const upp = Math.max(1, it.units_per_pack || parseUnitsPerPack(it.packing));
@@ -2707,7 +2824,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       setTaxOverrideAuthorizedBy(p.tax_override_authorized_by || 'Chief Pharmacist / Admin');
       setPaymentMode(p.payment_mode || 'Credit');
       setPaymentAccountId(p.payment_account_id ? String(p.payment_account_id) : '');
-      setPaidAmount(p.paid_amount || 0);
+      setPaidAmount(Math.max(0, Number(p.paid_amount ?? 0)));
       setPaidAmountManuallyEdited(true);
       const normalizedItems: PurchaseLineItem[] = pItems.map((it: any) => {
         const upp = Math.max(1, it.units_per_pack || parseUnitsPerPack(it.packing));
@@ -2730,6 +2847,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       setFormError(err instanceof Error ? err.message : String(err));
     }
   };
+
+  useEffect(() => {
+    if (resumePurchaseId && resumePurchaseId > 0) {
+      handleEditPurchase(resumePurchaseId);
+      onClearResume?.();
+    }
+  }, [resumePurchaseId]);
 
   // Cancel Purchase Invoice with Reversal Entries
   const handleCancelPurchase = async (pur: PurchaseInvoice) => {
@@ -3490,7 +3614,14 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     </div>
                     <button
                       type="button"
-                      onClick={() => openPurchaseItemListForRow(selectedPurchaseLineIndex, 'pos_row')}
+                      onClick={() =>
+                        openPurchaseItemListForRow(
+                          lines[selectedPurchaseLineIndex]?.item_id
+                            ? null
+                            : selectedPurchaseLineIndex,
+                          'pos_row'
+                        )
+                      }
                       className="px-2 py-0 rounded bg-slate-700 hover:bg-slate-600 text-white font-bold flex items-center gap-1 cursor-pointer shrink-0"
                       title="Open Item List (F2)"
                     >
@@ -4125,6 +4256,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                       <span className="font-bold text-emerald-300 whitespace-nowrap">Cash Paid:</span>
                       <NumericInput
                         value={paidAmount}
+                        displayZero={Boolean(editingPurchaseId) || paidAmountManuallyEdited}
                         onChange={(e) => {
                           setPaidAmountManuallyEdited(true);
                           setPaidAmount(Math.max(0, parseFloat(e.target.value) || 0));
@@ -4546,7 +4678,12 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     <button
                       type="button"
                       onClick={() =>
-                        openPurchaseItemListForRow(selectedPurchaseLineIndex, 'access_row')
+                        openPurchaseItemListForRow(
+                          lines[selectedPurchaseLineIndex]?.item_id
+                            ? null
+                            : selectedPurchaseLineIndex,
+                          'access_row'
+                        )
                       }
                       className="px-1.5 py-0 rounded bg-slate-700 hover:bg-slate-600 text-white font-bold flex items-center gap-0.5 cursor-pointer"
                       title="Open Item List (F2)"
@@ -5248,6 +5385,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                         step="0.01"
                         min="0"
                         value={paidAmount}
+                        displayZero={Boolean(editingPurchaseId) || paidAmountManuallyEdited}
                         onChange={(e) => {
                           setPaidAmountManuallyEdited(true);
                           setPaidAmount(Math.max(0, parseFloat(e.target.value) || 0));
@@ -6132,6 +6270,14 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         onSelectItem={handleSelectItemFromPurchaseListModal}
         onSwitchToAddNewLine={() => setPurchaseItemListTargetRowIdx(null)}
         onClose={closePurchaseItemListModal}
+      />
+
+      <DuplicateItemConfirmModal
+        isOpen={Boolean(pendingDuplicatePrompt)}
+        itemName={pendingDuplicatePrompt?.item.item_name}
+        itemCode={pendingDuplicatePrompt?.item.item_code}
+        onConfirmNewRow={handleConfirmAddDuplicatePurchaseRow}
+        onCancel={handleCancelDuplicatePurchasePrompt}
       />
     </div>
   );

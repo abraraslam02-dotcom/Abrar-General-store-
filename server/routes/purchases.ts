@@ -1459,6 +1459,7 @@ purchasesRouter.get('/', (req: Request, res: Response) => {
       .prepare(`
         SELECT
           p.*,
+          COALESCE(p.paid_amount, 0) as paid_amount,
           a.account_code as supplier_code,
           a.account_name as supplier_name,
           a.ntn as supplier_ntn,
@@ -1547,6 +1548,7 @@ purchasesRouter.get('/:id', (req: Request, res: Response) => {
       .prepare(`
         SELECT
           p.*,
+          COALESCE(p.paid_amount, 0) as paid_amount,
           a.account_code as supplier_code,
           a.account_name as supplier_name,
           a.ntn as supplier_ntn,

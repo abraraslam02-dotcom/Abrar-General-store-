@@ -685,6 +685,11 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                   <div className="text-lg font-black text-slate-950 mt-0.5 leading-snug">
                     {docRecord.customer_name || 'Walk-in Cash Customer'}
                   </div>
+                  {!isReturn && docRecord.buyer_name && (
+                    <div className="text-[13px] font-bold text-slate-800 mt-0.5">
+                      Buyer: {docRecord.buyer_name}
+                    </div>
+                  )}
                   <div className="text-[13px] text-slate-700 mt-1">
                     {docRecord.customer_code ? `Account Code: ${docRecord.customer_code} · ` : ''}
                     Tax Status:{' '}
@@ -1186,6 +1191,16 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                           {docRecord.customer_city ? ` ${docRecord.customer_city}` : ''}
                         </td>
                       </tr>
+                      {!isReturn && docRecord.buyer_name ? (
+                        <tr>
+                          <td className="border border-black px-1.5 py-0.5 font-semibold whitespace-nowrap">
+                            Buyer
+                          </td>
+                          <td className="border border-black px-1.5 py-0.5 font-bold break-words">
+                            {docRecord.buyer_name}
+                          </td>
+                        </tr>
+                      ) : null}
                       {showCustPhone && docRecord.customer_phone ? (
                         <tr>
                           <td className="border border-black px-1.5 py-0.5 font-semibold whitespace-nowrap">

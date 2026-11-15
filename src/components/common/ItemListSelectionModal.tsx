@@ -50,11 +50,18 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
     if (!isOpen) return;
     setQuery('');
     setHighlightIdx(0);
-    const timer = window.setTimeout(() => {
+    let timer = 0;
+    const raf = window.requestAnimationFrame(() => {
       inputRef.current?.focus();
       inputRef.current?.select?.();
-    }, 0);
-    return () => window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        inputRef.current?.focus();
+      }, 25);
+    });
+    return () => {
+      window.cancelAnimationFrame(raf);
+      if (timer) window.clearTimeout(timer);
+    };
   }, [isOpen]);
 
   const effectiveIndexed = useMemo(
@@ -85,9 +92,39 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
     }, 0);
   };
 
+  const handleModalKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      e.stopPropagation();
+      setHighlightIdx((prev) => {
+        const next = Math.min(Math.max(0, results.length - 1), prev + 1);
+        scrollRowIntoView(next);
+        return next;
+      });
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopPropagation();
+      setHighlightIdx((prev) => {
+        const next = Math.max(0, prev - 1);
+        scrollRowIntoView(next);
+        return next;
+      });
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      const chosen = results[highlightIdx] || results[0];
+      if (chosen) onSelectItem(chosen);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
+    }
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4"
+      onKeyDown={handleModalKeyDown}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) {
           onClose();
@@ -113,7 +150,10 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
             {hasTargetItem && onSwitchToAddNewLine && (
               <button
                 type="button"
-                onClick={onSwitchToAddNewLine}
+                onClick={() => {
+                  onSwitchToAddNewLine();
+                  window.setTimeout(() => inputRef.current?.focus(), 0);
+                }}
                 className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-[11px] cursor-pointer"
               >
                 Switch to Add New Line
@@ -140,30 +180,6 @@ export function ItemListSelectionModal<T extends BaseSearchableItem>({
             onChange={(e) => {
               setQuery(e.target.value);
               setHighlightIdx(0);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'ArrowDown') {
-                e.preventDefault();
-                setHighlightIdx((prev) => {
-                  const next = Math.min(Math.max(0, results.length - 1), prev + 1);
-                  scrollRowIntoView(next);
-                  return next;
-                });
-              } else if (e.key === 'ArrowUp') {
-                e.preventDefault();
-                setHighlightIdx((prev) => {
-                  const next = Math.max(0, prev - 1);
-                  scrollRowIntoView(next);
-                  return next;
-                });
-              } else if (e.key === 'Enter') {
-                e.preventDefault();
-                const chosen = results[highlightIdx] || results[0];
-                if (chosen) onSelectItem(chosen);
-              } else if (e.key === 'Escape') {
-                e.preventDefault();
-                onClose();
-              }
             }}
             placeholder="Filter Item List by Item Code, Item Name, Company, or Barcode... (↑/↓ Navigate, Enter Select, Esc Close)"
             className="w-full pl-9 pr-4 py-2 rounded-xl border border-slate-300 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-600"

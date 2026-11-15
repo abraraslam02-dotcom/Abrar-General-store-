@@ -41,6 +41,7 @@ export type NavTabId =
   | 'sales-return'
   | 'sale-returns'
   | 'sales-register'
+  | 'sales-lookup'
   | 'sales-reports'
   | 'sales-customer-wise'
   | 'sales-salesman-wise'
@@ -57,6 +58,7 @@ export type NavTabId =
   | 'purchases-return'
   | 'purchase-returns'
   | 'purchase-history'
+  | 'purchase-lookup'
   | 'purchase-reports'
   | 'purchase-supplier-report'
   // E. FINANCIAL MANAGEMENT
@@ -351,6 +353,7 @@ const LEAF_ICON: Partial<Record<NavTabId, IconName>> = {
   'sales-pos': 'pos',
   'sales-return': 'refresh',
   'sales-register': 'doc',
+  'sales-lookup': 'search',
   'sales-reports': 'chart',
   'sales-customer-wise': 'users',
   'sales-salesman-wise': 'user',
@@ -381,6 +384,7 @@ const LEAF_ICON: Partial<Record<NavTabId, IconName>> = {
   'purchases-bill': 'doc',
   'purchases-return': 'refresh',
   'purchase-history': 'clock',
+  'purchase-lookup': 'search',
   'purchase-reports': 'chart',
   'purchase-supplier-report': 'truck',
   'cash-book-unified': 'cash',
@@ -524,6 +528,7 @@ const MENU: MenuNode[] = [
       { id: 'sales-pos', label: 'Sales Invoice', badge: 'POS' },
       { id: 'sales-return', label: 'Sales Return' },
       { id: 'sales-register', label: 'Sales History' },
+      { id: 'sales-lookup', label: 'Lookup', canSee: (p) => p.sales?.view !== false },
       { id: 'sales-reports', label: 'Sales Reports' },
       { id: 'sales-customer-wise', label: 'Customer Sales Report' },
       { id: 'sales-salesman-wise', label: 'Salesman Sales Report' },
@@ -567,6 +572,7 @@ const MENU: MenuNode[] = [
       { id: 'purchases-bill', label: 'Purchase Invoice' },
       { id: 'purchases-return', label: 'Purchase Return' },
       { id: 'purchase-history', label: 'Purchase History' },
+      { id: 'purchase-lookup', label: 'Lookup', canSee: (p) => p.purchases?.view !== false },
       { id: 'purchase-reports', label: 'Purchase Reports' },
       { id: 'purchase-supplier-report', label: 'Supplier Purchase Report' },
     ],

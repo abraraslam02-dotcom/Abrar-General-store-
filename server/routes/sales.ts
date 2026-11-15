@@ -577,11 +577,12 @@ salesRouter.get('/', (req: Request, res: Response) => {
       whereSql += ` AND (
         s.invoice_number LIKE ?
         OR s.customer_name LIKE ?
+        OR COALESCE(s.buyer_name, '') LIKE ?
         OR a.account_code LIKE ?
         OR s.salesman LIKE ?
         OR s.remarks LIKE ?
       ) `;
-      params.push(term, term, term, term, term);
+      params.push(term, term, term, term, term, term);
     }
 
     const countRow = db
@@ -611,6 +612,8 @@ salesRouter.get('/', (req: Request, res: Response) => {
       .prepare(`
         SELECT
           s.*,
+          COALESCE(s.paid_amount, 0) as paid_amount,
+          COALESCE(s.buyer_name, '') as buyer_name,
           a.account_code as customer_code,
           a.phone as customer_phone,
           a.city as customer_city,
@@ -827,6 +830,8 @@ salesRouter.get('/:id', (req: Request, res: Response, next) => {
       .prepare(`
         SELECT
           s.*,
+          COALESCE(s.paid_amount, 0) as paid_amount,
+          COALESCE(s.buyer_name, '') as buyer_name,
           a.account_code as customer_code,
           a.phone as customer_phone,
           a.address as customer_address,
@@ -1050,6 +1055,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
     }
 
     const customerName = String(body.customer_name || customer.account_name || 'Walk-in Cash Customer').trim();
+    const buyerName = String(body.buyer_name || '').trim();
     const customerFilerStatus = ['Filer', 'Non-Filer', 'Exempt'].includes(String(body.customer_filer_status))
       ? String(body.customer_filer_status)
       : String(customer.filer_status || 'Non-Filer');
@@ -1429,6 +1435,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
             invoice_date = ?,
             customer_account_id = ?,
             customer_name = ?,
+            buyer_name = ?,
             customer_filer_status = ?,
             salesman_id = ?,
             salesman = ?,
@@ -1478,6 +1485,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         invoiceDate,
         customerAccountId,
         customerName,
+        buyerName,
         customerFilerStatus,
         salesmanId,
         salesman,
@@ -1525,7 +1533,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
     } else {
       const insertSale = db.prepare(`
         INSERT INTO sales (
-          invoice_number, invoice_date, customer_account_id, customer_name,
+          invoice_number, invoice_date, customer_account_id, customer_name, buyer_name,
           customer_filer_status, salesman_id, salesman,
           deliveryman_id, deliveryman_name, delivery_status, delivery_date, delivery_time,
           delivery_notes, delivery_charges, delivery_completed_by, delivery_completed_at,
@@ -1538,7 +1546,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
           total_receivable, paid_amount, balance_amount, allow_negative_stock,
           status, remarks
         ) VALUES (
-          ?, ?, ?, ?,
+          ?, ?, ?, ?, ?,
           ?, ?, ?,
           ?, ?, ?, ?, ?,
           ?, ?, ?, ?,
@@ -1558,6 +1566,7 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
         invoiceDate,
         customerAccountId,
         customerName,
+        buyerName,
         customerFilerStatus,
         salesmanId,
         salesman,

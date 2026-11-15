@@ -61,6 +61,7 @@ export function runMigrations(): MigrationResult {
   const migrationName27 = '027_item_search_indexes_and_purchase_loose_rate';
   const migrationName28 = '028_automatic_item_code_sequence_and_cities_master';
   const migrationName29 = '029_item_companies_master';
+  const migrationName30 = '030_buyer_field_and_lookup_indexes';
 
   const executeMigration = db.transaction(() => {
     // A. Check if table 'items' exists and needs upgrade before SCHEMA_SQL
@@ -4024,6 +4025,45 @@ export function runMigrations(): MigrationResult {
     if (!applied29) {
       db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName29, 29);
     }
+
+    // ------------------------------------------------------------------------
+    // MIGRATION 30: Sales Buyer Field & Lookup Performance Indexes
+    // ------------------------------------------------------------------------
+    const applied30 = db
+      .prepare('SELECT id FROM database_migrations WHERE migration_name = ?')
+      .get(migrationName30);
+
+    const salesTableExists = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sales'")
+      .get();
+    if (salesTableExists) {
+      const salesCols = (db.prepare('PRAGMA table_info(sales)').all() as Array<{ name: string }>).map(
+        (c) => c.name
+      );
+      if (!salesCols.includes('buyer_name')) {
+        db.exec("ALTER TABLE sales ADD COLUMN buyer_name TEXT NOT NULL DEFAULT '';");
+      }
+    }
+
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_sales_buyer_nocase ON sales(buyer_name COLLATE NOCASE);
+      CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(invoice_date);
+      CREATE INDEX IF NOT EXISTS idx_sales_customer_name_nocase ON sales(customer_name COLLATE NOCASE);
+      CREATE INDEX IF NOT EXISTS idx_sales_number_nocase ON sales(invoice_number COLLATE NOCASE);
+      CREATE INDEX IF NOT EXISTS idx_sale_items_sale_id ON sale_items(sale_id);
+      CREATE INDEX IF NOT EXISTS idx_sale_items_item_id ON sale_items(item_id);
+      CREATE INDEX IF NOT EXISTS idx_purchases_date ON purchases(bill_date);
+      CREATE INDEX IF NOT EXISTS idx_purchases_bill_number_nocase ON purchases(bill_number COLLATE NOCASE);
+      CREATE INDEX IF NOT EXISTS idx_purchase_items_purchase_id ON purchase_items(purchase_id);
+      CREATE INDEX IF NOT EXISTS idx_purchase_items_item_id ON purchase_items(item_id);
+      CREATE INDEX IF NOT EXISTS idx_items_generic_nocase ON items(generic_name COLLATE NOCASE);
+      CREATE INDEX IF NOT EXISTS idx_items_category_nocase ON items(category COLLATE NOCASE);
+      CREATE INDEX IF NOT EXISTS idx_items_company_nocase ON items(company_name COLLATE NOCASE);
+    `);
+
+    if (!applied30) {
+      db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName30, 30);
+    }
   });
 
   try {
@@ -4042,7 +4082,7 @@ export function runMigrations(): MigrationResult {
 
     return {
       success: true,
-      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}, ${migrationName29}`,
+      appliedMigration: `${migrationName1}, ${migrationName2}, ${migrationName3}, ${migrationName4}, ${migrationName5}, ${migrationName6}, ${migrationName7}, ${migrationName8}, ${migrationName9}, ${migrationName10}, ${migrationName11}, ${migrationName12}, ${migrationName13}, ${migrationName14}, ${migrationName15}, ${migrationName16}, ${migrationName17}, ${migrationName18}, ${migrationName19}, ${migrationName20}, ${migrationName21}, ${migrationName22}, ${migrationName23}, ${migrationName24}, ${migrationName25}, ${migrationName26}, ${migrationName27}, ${migrationName28}, ${migrationName29}, ${migrationName30}`,
       tablesVerified: tables.length,
       newlyAppliedCount,
       message: `Successfully verified schema (${newlyAppliedCount} new migration(s) applied). ${tables.length} tables verified.`,

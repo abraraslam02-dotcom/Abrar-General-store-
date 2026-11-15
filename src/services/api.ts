@@ -2449,10 +2449,14 @@ export const api = {
         String(p.client_tx_id) === String(id)
     );
     if (found) {
+      const normalizedPurchase = {
+        ...found,
+        paid_amount: Number(found.paid_amount ?? 0),
+      };
       return {
         success: true,
         offline: true,
-        purchase: found,
+        purchase: normalizedPurchase,
         items: found.items || [],
         journalLines: [],
       };
@@ -3146,11 +3150,16 @@ export const api = {
         String(s.client_tx_id) === String(id)
     );
     if (found) {
+      const normalizedSale = {
+        ...found,
+        paid_amount: Number(found.paid_amount ?? 0),
+        buyer_name: String(found.buyer_name ?? ''),
+      };
       return {
         success: true,
         offline: true,
-        invoice: found,
-        sale: found,
+        invoice: normalizedSale,
+        sale: normalizedSale,
         items: found.items || found.lines || [],
         journalLines: [],
       };
@@ -7083,6 +7092,228 @@ export const api = {
     const data = await res.json();
     if (!res.ok || !data.success) throw new Error(data.error || 'Failed to reopen closed period');
     return data;
+  },
+
+  /**
+   * Unified Invoice Lookup Module (Sales & Purchase + Item Master criteria)
+   */
+  async lookupInvoices(params: {
+    scope?: 'sales' | 'purchase' | 'all';
+    invoiceNumber?: string;
+    invoiceDate?: string;
+    startDate?: string;
+    endDate?: string;
+    customerName?: string;
+    supplierName?: string;
+    buyerName?: string;
+    itemCode?: string;
+    itemName?: string;
+    barcode?: string;
+    companyName?: string;
+    genericName?: string;
+    category?: string;
+    packing?: string;
+    rackNumber?: string;
+    sortBy?: 'invoice_date' | 'invoice_number';
+    sortOrder?: 'asc' | 'desc';
+    limit?: number;
+  }) {
+    const q = new URLSearchParams();
+    Object.entries(params).forEach(([key, val]) => {
+      if (val !== undefined && val !== null && String(val).trim() !== '') {
+        q.set(key, String(val).trim());
+      }
+    });
+
+    try {
+      const res = await authFetch(`/api/lookup/invoices?${q.toString()}`);
+      const data = await res.json();
+      if (res.ok && data.success) {
+        return data;
+      }
+      if (res.status === 403) {
+        throw new Error(data.error || 'Access denied');
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('Access denied')) throw err;
+    }
+
+    // Offline IndexedDB fallback with single-invoice deduplication
+    const [salesRows, purchaseRows, itemsRows] = await Promise.all([
+      offlineStorage.getAll<any>('sales').catch(() => []),
+      offlineStorage.getAll<any>('purchases').catch(() => []),
+      offlineStorage.getAll<any>('items').catch(() => []),
+    ]);
+
+    const itemById = new Map<number, any>();
+    for (const it of itemsRows) {
+      itemById.set(Number(it.id), it);
+    }
+
+    const norm = (v: unknown) => String(v ?? '').trim().toLowerCase();
+    const scope = params.scope || 'all';
+    const fInvNo = norm(params.invoiceNumber);
+    const fInvDate = norm(params.invoiceDate);
+    const fStartDate = norm(params.startDate);
+    const fEndDate = norm(params.endDate);
+    const fCustomer = norm(params.customerName);
+    const fSupplier = norm(params.supplierName);
+    const fBuyer = norm(params.buyerName);
+
+    const fItemCode = norm(params.itemCode);
+    const fItemName = norm(params.itemName);
+    const fBarcode = norm(params.barcode);
+    const fCompany = norm(params.companyName);
+    const fGeneric = norm(params.genericName);
+    const fCategory = norm(params.category);
+    const fPacking = norm(params.packing);
+    const fRack = norm(params.rackNumber);
+
+    const hasItemCriteria = Boolean(
+      fItemCode || fItemName || fBarcode || fCompany || fGeneric || fCategory || fPacking || fRack
+    );
+
+    const lineMatches = (line: any): boolean => {
+      const master = itemById.get(Number(line.item_id || 0)) || {};
+      const code = norm(line.item_code || master.item_code);
+      const name = norm(line.item_name || master.item_name);
+      const barcode = norm(master.barcode);
+      const company = norm(line.company_name || master.company_name);
+      const generic = norm(master.generic_name);
+      const category = norm(master.category);
+      const packing = norm(line.packing || master.packing);
+      const rack = norm(master.rack_number);
+
+      if (fItemCode && !code.includes(fItemCode)) return false;
+      if (fItemName && !name.includes(fItemName)) return false;
+      if (fBarcode && !barcode.includes(fBarcode)) return false;
+      if (fCompany && !company.includes(fCompany)) return false;
+      if (fGeneric && !generic.includes(fGeneric)) return false;
+      if (fCategory && !category.includes(fCategory)) return false;
+      if (fPacking && !packing.includes(fPacking)) return false;
+      if (fRack && !rack.includes(fRack)) return false;
+      return true;
+    };
+
+    const results: any[] = [];
+
+    if ((scope === 'all' || scope === 'sales') && !fSupplier) {
+      for (const s of salesRows) {
+        const invNo = String(s.invoice_number || '');
+        const invDate = String(s.invoice_date || '').slice(0, 10);
+        const custName = String(s.customer_name || '');
+        const bName = String(s.buyer_name || '');
+        if (fInvNo && !invNo.toLowerCase().includes(fInvNo)) continue;
+        if (fInvDate && invDate !== fInvDate) continue;
+        if (fStartDate && invDate < fStartDate) continue;
+        if (fEndDate && invDate > fEndDate) continue;
+        if (fCustomer && !custName.toLowerCase().includes(fCustomer)) continue;
+        if (fBuyer && !bName.toLowerCase().includes(fBuyer)) continue;
+
+        const lines = Array.isArray(s.items) ? s.items : Array.isArray(s.lines) ? s.lines : [];
+        const matchedLines = hasItemCriteria ? lines.filter(lineMatches) : lines;
+        if (hasItemCriteria && matchedLines.length === 0) continue;
+
+        const rep = matchedLines[0] || {};
+        const repMaster = itemById.get(Number(rep.item_id || 0)) || {};
+        const qtySum = matchedLines.reduce((acc: number, l: any) => acc + Number(l.quantity || 0), 0);
+
+        results.push({
+          uid: `sale-${s.id}`,
+          invoice_id: Number(s.server_id || s.id),
+          invoice_type: 'Sales',
+          invoice_number: invNo,
+          invoice_date: invDate,
+          party_name: custName,
+          buyer_name: bName,
+          item_code: String(rep.item_code || repMaster.item_code || ''),
+          item_name: String(rep.item_name || repMaster.item_name || ''),
+          company_name: String(rep.company_name || repMaster.company_name || ''),
+          quantity: Math.round((qtySum + Number.EPSILON) * 100) / 100,
+          invoice_total: Number(s.net_total || 0),
+          paid_amount: Number(s.paid_amount ?? 0),
+          payment_mode: String(s.payment_mode || ''),
+          status: String(s.status || ''),
+          matched_item_count: matchedLines.length,
+          total_item_count: lines.length,
+        });
+      }
+    }
+
+    if ((scope === 'all' || scope === 'purchase') && !fCustomer && !fBuyer) {
+      for (const p of purchaseRows) {
+        const invNo = String(p.bill_number || p.invoice_number || '');
+        const supInvNo = String(p.supplier_invoice_number || '');
+        const invDate = String(p.bill_date || p.invoice_date || '').slice(0, 10);
+        const supName = String(p.supplier_name || '');
+        if (
+          fInvNo &&
+          !invNo.toLowerCase().includes(fInvNo) &&
+          !supInvNo.toLowerCase().includes(fInvNo)
+        ) {
+          continue;
+        }
+        if (fInvDate && invDate !== fInvDate) continue;
+        if (fStartDate && invDate < fStartDate) continue;
+        if (fEndDate && invDate > fEndDate) continue;
+        if (fSupplier && !supName.toLowerCase().includes(fSupplier)) continue;
+
+        const lines = Array.isArray(p.items) ? p.items : [];
+        const matchedLines = hasItemCriteria ? lines.filter(lineMatches) : lines;
+        if (hasItemCriteria && matchedLines.length === 0) continue;
+
+        const rep = matchedLines[0] || {};
+        const repMaster = itemById.get(Number(rep.item_id || 0)) || {};
+        const qtySum = matchedLines.reduce((acc: number, l: any) => acc + Number(l.quantity || 0), 0);
+
+        results.push({
+          uid: `purchase-${p.id}`,
+          invoice_id: Number(p.server_id || p.id),
+          invoice_type: 'Purchase',
+          invoice_number: invNo,
+          invoice_date: invDate,
+          party_name: supName,
+          buyer_name: '',
+          supplier_invoice_number: supInvNo,
+          item_code: String(rep.item_code || repMaster.item_code || ''),
+          item_name: String(rep.item_name || repMaster.item_name || ''),
+          company_name: String(rep.company_name || repMaster.company_name || ''),
+          quantity: Math.round((qtySum + Number.EPSILON) * 100) / 100,
+          invoice_total: Number(p.net_total || 0),
+          paid_amount: Number(p.paid_amount ?? 0),
+          payment_mode: String(p.payment_mode || ''),
+          status: String(p.status || ''),
+          matched_item_count: matchedLines.length,
+          total_item_count: lines.length,
+        });
+      }
+    }
+
+    const sortBy = params.sortBy === 'invoice_number' ? 'invoice_number' : 'invoice_date';
+    const dir = params.sortOrder === 'asc' ? 1 : -1;
+    results.sort((a, b) => {
+      if (sortBy === 'invoice_number') {
+        const cmp = String(a.invoice_number || '').localeCompare(String(b.invoice_number || ''), undefined, {
+          numeric: true,
+          sensitivity: 'base',
+        });
+        if (cmp !== 0) return cmp * dir;
+      } else {
+        const cmp = String(a.invoice_date || '').localeCompare(String(b.invoice_date || ''));
+        if (cmp !== 0) return cmp * dir;
+      }
+      return Number(b.invoice_id || 0) - Number(a.invoice_id || 0);
+    });
+
+    const limit = Math.min(1000, Math.max(10, Number(params.limit || 300)));
+    return {
+      success: true,
+      offline: true,
+      count: Math.min(results.length, limit),
+      totalCount: results.length,
+      data: results.slice(0, limit),
+    };
   },
 };
 

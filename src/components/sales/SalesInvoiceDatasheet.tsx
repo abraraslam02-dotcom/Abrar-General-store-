@@ -18,6 +18,7 @@ import { NumericInput } from '../common/NumericInput';
 import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { SimpleSyncStatusBar } from '../common/SimpleSyncStatusBar';
 import { ItemListSelectionModal } from '../common/ItemListSelectionModal';
+import { DuplicateItemConfirmModal } from '../common/DuplicateItemConfirmModal';
 import {
   InvoiceRecordSearchInput,
   InvoiceSearchableItem,
@@ -304,6 +305,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const [invoiceDate, setInvoiceDate] = useState<string>(new Date().toISOString().slice(0, 10));
   const [customerAccountId, setCustomerAccountId] = useState<number>(0);
   const [customerSearchText, setCustomerSearchText] = useState<string>('');
+  const [buyerName, setBuyerName] = useState<string>('');
 
   // Salesman & Deliveryman State (Strictly Separate)
   const [salesmenList, setSalesmenList] = useState<SalesmanRecord[]>([]);
@@ -426,6 +428,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const [editingItemName, setEditingItemName] = useState<{ rowIdx: number; value: string } | null>(null);
   const [showItemListModal, setShowItemListModal] = useState<boolean>(false);
   const [itemListTargetRowIdx, setItemListTargetRowIdx] = useState<number | null>(null);
+  const [pendingDuplicatePrompt, setPendingDuplicatePrompt] = useState<{
+    item: FastSearchItem;
+    clearRowIdx: number | null;
+  } | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const posSearchInputRef = useRef<HTMLInputElement | null>(null);
   const searchRequestIdRef = useRef(0);
@@ -551,6 +557,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             );
             setInvoiceDate(parsed.invoiceDate || new Date().toISOString().slice(0, 10));
             setCustomerAccountId(Number(parsed.customerAccountId || 0));
+            setBuyerName(String(parsed.buyerName || ''));
             setSalesmanId(parsed.salesmanId || (activeSalesmen[0]?.id ?? null));
             setSalesman(parsed.salesman || activeSalesmen[0]?.name || 'Counter Pharmacist');
             setDeliverymanId(parsed.deliverymanId || null);
@@ -569,6 +576,12 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             setAdvanceTaxRate(Number(parsed.advanceTaxRate || 0));
             setIsTaxOverridden(Boolean(parsed.isTaxOverridden));
             setTaxOverrideReason(parsed.taxOverrideReason || '');
+            if (parsed.paidAmountInput !== undefined && parsed.paidAmountInput !== null) {
+              setPaidAmountInput(String(parsed.paidAmountInput));
+            }
+            if (parsed.paidAmountManuallyEdited !== undefined) {
+              setPaidAmountManuallyEdited(Boolean(parsed.paidAmountManuallyEdited));
+            }
             setAllowNegativeStock(
               parsed.allowNegativeStock !== undefined ? Boolean(parsed.allowNegativeStock) : true
             );
@@ -839,6 +852,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       invoiceNumber,
       invoiceDate,
       customerAccountId,
+      buyerName,
       salesmanId,
       salesman,
       deliverymanId,
@@ -854,6 +868,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       advanceTaxRate,
       isTaxOverridden,
       taxOverrideReason,
+      paidAmountInput,
+      paidAmountManuallyEdited,
       allowNegativeStock,
       remarks,
       rows,
@@ -864,6 +880,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     invoiceNumber,
     invoiceDate,
     customerAccountId,
+    buyerName,
     salesmanId,
     salesman,
     deliverymanId,
@@ -879,6 +896,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     advanceTaxRate,
     isTaxOverridden,
     taxOverrideReason,
+    paidAmountInput,
+    paidAmountManuallyEdited,
     allowNegativeStock,
     remarks,
     rows,
@@ -896,6 +915,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         setInvoiceNumber(inv.invoice_number);
         setInvoiceDate(inv.invoice_date);
         setCustomerAccountId(Number(inv.customer_account_id));
+        setBuyerName(String(inv.buyer_name || ''));
         setSalesmanId(inv.salesman_id ? Number(inv.salesman_id) : null);
         setSalesman(inv.salesman || 'Counter Pharmacist');
         setDeliverymanId(inv.deliveryman_id ? Number(inv.deliveryman_id) : null);
@@ -912,6 +932,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         setAdvanceTaxRate(Number(inv.advance_tax_rate || 0));
         setIsTaxOverridden(Boolean(inv.is_tax_overridden));
         setTaxOverrideReason(inv.tax_override_reason || '');
+        const rawPaidAmt = Number(inv.paid_amount ?? 0);
+        const safePaidAmt = Number.isFinite(rawPaidAmt) ? Math.max(0, rawPaidAmt) : 0;
+        setPaidAmountManuallyEdited(true);
+        setPaidAmountInput(String(safePaidAmt));
         setAllowNegativeStock(Boolean(inv.allow_negative_stock));
         setRemarks(inv.remarks || '');
 
@@ -1202,17 +1226,79 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           ? `pos_row_${rowIdx}_quantity`
           : `cell_${rowIdx}_quantity`;
       pendingFocusTargetRef.current = targetId;
+      window.requestAnimationFrame(() => {
+        setTimeout(() => {
+          const rowQtyEl = document.getElementById(`pos_row_${rowIdx}_quantity`) as HTMLInputElement | null;
+          rowQtyEl?.closest('tr')?.scrollIntoView({ block: 'nearest' });
+          const qtyEl = document.getElementById(targetId) as HTMLInputElement | null;
+          if (qtyEl) {
+            qtyEl.focus();
+            qtyEl.select?.();
+            qtyEl.closest('tr')?.scrollIntoView({ block: 'nearest' });
+          }
+        }, 35);
+      });
+    }
+  };
+
+  // Return focus to active Item Search input after cancelling Duplicate Item prompt
+  const focusSalesItemSearch = () => {
+    window.requestAnimationFrame(() => {
       setTimeout(() => {
-        const rowQtyEl = document.getElementById(`pos_row_${rowIdx}_quantity`) as HTMLInputElement | null;
-        rowQtyEl?.closest('tr')?.scrollIntoView({ block: 'nearest' });
-        const qtyEl = document.getElementById(targetId) as HTMLInputElement | null;
-        if (qtyEl) {
-          qtyEl.focus();
-          qtyEl.select?.();
-          qtyEl.closest('tr')?.scrollIntoView({ block: 'nearest' });
+        const target =
+          invoiceViewMode === 'pos'
+            ? posSearchInputRef.current || searchInputRef.current
+            : searchInputRef.current || posSearchInputRef.current;
+        if (target) {
+          target.focus();
+          target.select?.();
         }
       }, 30);
+    });
+  };
+
+  const handleConfirmAddDuplicateRow = () => {
+    if (!pendingDuplicatePrompt) return;
+    const { item, clearRowIdx } = pendingDuplicatePrompt;
+    setPendingDuplicatePrompt(null);
+    setShowSearchDropdown(false);
+    setQuickSearchQuery('');
+    setSearchResults([]);
+    setActiveSearchRowIdx(null);
+    setEditingItemCode(null);
+    setEditingItemName(null);
+
+    let newIdx = -1;
+    if (clearRowIdx !== null && rows[clearRowIdx] && rows[clearRowIdx].item_id === null) {
+      newIdx = clearRowIdx;
+    } else {
+      const firstBlankIdx = rows.findIndex((r) => r.item_id === null);
+      newIdx = firstBlankIdx >= 0 ? firstBlankIdx : rows.length;
     }
+
+    populateRowWithItem(newIdx, item, true);
+  };
+
+  const handleCancelDuplicatePrompt = () => {
+    const clearIdx = pendingDuplicatePrompt?.clearRowIdx ?? null;
+    setPendingDuplicatePrompt(null);
+    setShowSearchDropdown(false);
+    setQuickSearchQuery('');
+    setSearchResults([]);
+    setActiveSearchRowIdx(null);
+    setEditingItemCode(null);
+    setEditingItemName(null);
+
+    if (clearIdx !== null && rows[clearIdx] && rows[clearIdx].item_id === null) {
+      setRows((prev) => {
+        const next = [...prev];
+        if (next[clearIdx] && next[clearIdx].item_id === null) {
+          next[clearIdx] = createEmptyRow();
+        }
+        return next;
+      });
+    }
+    focusSalesItemSearch();
   };
 
   // Explicit Item Code validation & update: only modifies existing row if new code resolves to a valid catalog item
@@ -1267,6 +1353,18 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       return true;
     }
 
+    // Prompt confirmation if selected item already exists on another row in this invoice
+    const existsElsewhere = rows.some((r, idx) => idx !== rowIdx && r.item_id === matched.id);
+    if (existsElsewhere) {
+      committedCodeEditRef.current = true;
+      setShowSearchDropdown(false);
+      setPendingDuplicatePrompt({
+        item: matched,
+        clearRowIdx: currentRow?.item_id === null ? rowIdx : null,
+      });
+      return true;
+    }
+
     populateRowWithItem(rowIdx, matched, moveFocusToQty);
     return true;
   };
@@ -1290,37 +1388,18 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         ? activeSearchRowIdx
         : null;
 
-    if (existingDuplicateIdx >= 0 && existingDuplicateIdx !== activeIdx) {
-      // If user was typing in an empty row and picked an item already on the invoice, clear temporary typing and focus existing row's Qty
-      if (activeIdx !== null && rows[activeIdx] && rows[activeIdx].item_id === null) {
-        setRows((prev) => {
-          const next = [...prev];
-          next[activeIdx] = createEmptyRow();
-          return next;
-        });
-      }
+    if (existingDuplicateIdx >= 0 && existingDuplicateIdx !== targetRowOverride) {
       committedCodeEditRef.current = true;
-      setSelectedRowIndex(existingDuplicateIdx);
       setShowSearchDropdown(false);
       setQuickSearchQuery('');
       setSearchResults([]);
       setActiveSearchRowIdx(null);
       setEditingItemCode(null);
       setEditingItemName(null);
-
-      const qtyId =
-        invoiceViewMode === 'pos'
-          ? `pos_row_${existingDuplicateIdx}_quantity`
-          : `cell_${existingDuplicateIdx}_quantity`;
-      pendingFocusTargetRef.current = qtyId;
-      setTimeout(() => {
-        const qtyEl = document.getElementById(qtyId) as HTMLInputElement | null;
-        if (qtyEl) {
-          qtyEl.focus();
-          qtyEl.select?.();
-          qtyEl.closest('tr')?.scrollIntoView({ block: 'nearest' });
-        }
-      }, 30);
+      setPendingDuplicatePrompt({
+        item,
+        clearRowIdx: activeIdx !== null && rows[activeIdx]?.item_id === null ? activeIdx : null,
+      });
       return;
     }
 
@@ -1654,6 +1733,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     setEditingSaleId(null);
     setCustomerAccountId(0);
     setCustomerSearchText('');
+    setBuyerName('');
     setLiveBalanceSummary(null);
     setRows(ensureMinimumRows([]));
     setSelectedRowIndex(0);
@@ -1743,6 +1823,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         invoice_date: invoiceDate,
         customer_account_id: customerAccountId,
         customer_name: selectedCustomer?.account_name || 'Walk-in Cash Customer',
+        buyer_name: buyerName.trim(),
         customer_filer_status: customerFilerStatus,
         salesman_id: salesmanId,
         salesman,
@@ -1945,6 +2026,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         customerAccountId > 0
           ? selectedCustomer?.account_name || 'Walk-in Cash Customer'
           : 'Walk-in Cash Customer',
+      buyer_name: buyerName.trim(),
       customer_code: selectedCustomer?.account_code || '',
       customer_phone: selectedCustomer?.phone || '',
       customer_address: selectedCustomer?.address || '',
@@ -2032,6 +2114,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           customer_account_id: customerAccountId,
           customer_code: selectedCustomer?.account_code || 'CUS-1001',
           customer_name: selectedCustomer?.account_name || 'Walk-in Cash Customer',
+          buyer_name: buyerName.trim(),
           customer_filer_status: customerFilerStatus,
           salesman: salesman || 'Counter Pharmacist',
           invoice_type: invoiceType,
@@ -3239,9 +3322,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               </div>
             </div>
 
-            {/* Header Row 2: Salesman, Deliveryman, Prescription & Compact F3 Quick Add */}
+            {/* Header Row 2: Salesman, Deliveryman, Buyer, Ref & Compact F3 Quick Add */}
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-12 gap-1.5 pt-1 border-t border-slate-200 items-center">
-              <div className="md:col-span-3 flex items-center gap-1">
+              <div className="md:col-span-2 flex items-center gap-1">
                 <span className="font-bold text-slate-600 shrink-0">Salesman:</span>
                 <select
                   value={salesmanId || ''}
@@ -3251,7 +3334,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     const sm = salesmenList.find((s) => s.id === id);
                     if (sm) setSalesman(sm.name);
                   }}
-                  className="w-full px-1.5 py-0 font-semibold rounded border border-slate-300 bg-slate-50"
+                  className="w-full px-1 py-0 font-semibold rounded border border-slate-300 bg-slate-50"
                 >
                   <option value="">Counter Pharmacist</option>
                   {salesmenList.map((sm) => (
@@ -3262,7 +3345,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 </select>
               </div>
 
-              <div className="md:col-span-3 flex items-center gap-1">
+              <div className="md:col-span-2 flex items-center gap-1">
                 <span className="font-bold text-slate-600 shrink-0">Delivery:</span>
                 <select
                   value={deliverymanId || ''}
@@ -3272,7 +3355,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     const dm = deliverymenList.find((d) => d.id === id);
                     if (dm) setDeliverymanName(dm.name);
                   }}
-                  className="w-full px-1.5 py-0 font-semibold rounded border border-slate-300 bg-slate-50"
+                  className="w-full px-1 py-0 font-semibold rounded border border-slate-300 bg-slate-50"
                 >
                   <option value="">Counter Pickup</option>
                   {deliverymenList.map((dm) => (
@@ -3281,6 +3364,20 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     </option>
                   ))}
                 </select>
+              </div>
+
+              <div className="md:col-span-2 flex items-center gap-1">
+                <label htmlFor="pos_buyer_name_input" className="font-bold text-slate-600 shrink-0">
+                  Buyer:
+                </label>
+                <input
+                  id="pos_buyer_name_input"
+                  type="text"
+                  value={buyerName}
+                  onChange={(e) => setBuyerName(e.target.value)}
+                  placeholder="Buyer name..."
+                  className="w-full px-1.5 py-0 rounded border border-slate-300 bg-white text-slate-900 font-semibold focus:outline-none focus:border-emerald-600"
+                />
               </div>
 
               <div className="md:col-span-2 flex items-center gap-1">
@@ -3365,7 +3462,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 </div>
                 <button
                   type="button"
-                  onClick={() => openItemListForRow(selectedRowIndex)}
+                  onClick={() => openItemListForRow(rows[selectedRowIndex]?.item_id ? null : selectedRowIndex)}
                   className="px-2 py-0 rounded bg-slate-700 hover:bg-slate-600 text-white font-bold flex items-center gap-1 cursor-pointer shrink-0"
                   title="Open Item List (F2)"
                 >
@@ -3899,6 +3996,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   <span className="font-bold text-emerald-300 whitespace-nowrap">Cash Received:</span>
                   <NumericInput
                     value={paidAmountInput}
+                    displayZero={Boolean(editingSaleId) || paidAmountInput.trim() === '0'}
                     onChange={(e) => {
                       setPaidAmountManuallyEdited(true);
                       setPaidAmountInput(e.target.value);
@@ -4254,7 +4352,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               </div>
             </div>
 
-            {/* Row 2: Salesman, Deliveryman, Quick Search (F3) & Row Actions */}
+            {/* Row 2: Salesman, Deliveryman, Buyer, Quick Search (F3) & Row Actions */}
             <div className="grid grid-cols-12 gap-1.5 items-center pt-1 border-t border-slate-200">
               <div className="col-span-2 flex items-center gap-1">
                 <label className="font-bold text-slate-600 whitespace-nowrap">Salesman:</label>
@@ -4301,7 +4399,20 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   ))}
                 </select>
               </div>
-              <div className="col-span-4 relative">
+              <div className="col-span-2 flex items-center gap-1">
+                <label htmlFor="access_buyer_name_input" className="font-bold text-slate-600 whitespace-nowrap">
+                  Buyer:
+                </label>
+                <input
+                  id="access_buyer_name_input"
+                  type="text"
+                  value={buyerName}
+                  onChange={(e) => setBuyerName(e.target.value)}
+                  placeholder="Buyer name..."
+                  className="w-full px-1.5 py-0 rounded border border-slate-300 font-semibold text-slate-900 bg-white focus:outline-none focus:border-emerald-600"
+                />
+              </div>
+              <div className="col-span-3 relative">
                 <div className="flex items-center bg-white border border-slate-300 rounded px-1.5 focus-within:border-emerald-600">
                   <Search className="w-3 h-3 text-emerald-600 mr-1 shrink-0" />
                   <input
@@ -4369,10 +4480,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 </div>
                 {renderSalesExcelItemCombobox('top')}
               </div>
-              <div className="col-span-4 flex flex-wrap items-center justify-end gap-1">
+              <div className="col-span-3 flex flex-wrap items-center justify-end gap-1">
                 <button
                   type="button"
-                  onClick={() => openItemListForRow(selectedRowIndex)}
+                  onClick={() => openItemListForRow(rows[selectedRowIndex]?.item_id ? null : selectedRowIndex)}
                   className="px-1.5 py-0 rounded bg-slate-700 hover:bg-slate-600 text-white font-bold flex items-center gap-0.5 cursor-pointer"
                   title="Open Item List (F2)"
                 >
@@ -5224,6 +5335,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                   <span className="uppercase font-bold text-emerald-300">Cash Rec:</span>
                   <NumericInput
                     value={paidAmountInput}
+                    displayZero={Boolean(editingSaleId) || paidAmountInput.trim() === '0'}
                     onChange={(e) => {
                       setPaidAmountManuallyEdited(true);
                       setPaidAmountInput(e.target.value);
@@ -6004,7 +6116,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         <SalesPrintModal
           invoice={printInvoice}
           initialFormat={printFormat}
-          autoExportPdf={autoExportPdfOnOpen}
+          autoDirectPrint={autoExportPdfOnOpen}
           onClose={() => {
             setPrintInvoice(null);
             setAutoExportPdfOnOpen(false);
@@ -6066,19 +6178,41 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           it.total_available_packs ?? it.default_batch?.available_packs ?? 0
         }
         onSelectItem={(chosen) => {
-          if (itemListTargetRowIdx !== null) {
-            populateRowWithItem(itemListTargetRowIdx, chosen, true);
-          } else {
-            handleSelectFromTopSearch(chosen);
-          }
+          const targetIdx = itemListTargetRowIdx;
           setShowItemListModal(false);
           setItemListTargetRowIdx(null);
+
+          const alreadyExists = rows.some((r) => r.item_id === chosen.id);
+          if (alreadyExists) {
+            setPendingDuplicatePrompt({
+              item: chosen,
+              clearRowIdx: targetIdx !== null && rows[targetIdx]?.item_id === null ? targetIdx : null,
+            });
+            return;
+          }
+
+          if (targetIdx !== null) {
+            populateRowWithItem(targetIdx, chosen, true);
+          } else {
+            const firstEmptyIdx = rows.findIndex((r) => r.item_id === null);
+            const rowIdxToFill = firstEmptyIdx >= 0 ? firstEmptyIdx : rows.length;
+            populateRowWithItem(rowIdxToFill, chosen, true);
+          }
         }}
         onSwitchToAddNewLine={() => setItemListTargetRowIdx(null)}
         onClose={() => {
           setShowItemListModal(false);
           setItemListTargetRowIdx(null);
         }}
+      />
+
+      {/* ================= MODAL 9: DUPLICATE ITEM CONFIRMATION ================= */}
+      <DuplicateItemConfirmModal
+        isOpen={Boolean(pendingDuplicatePrompt)}
+        itemCode={pendingDuplicatePrompt?.item.item_code}
+        itemName={pendingDuplicatePrompt?.item.item_name}
+        onConfirmNewRow={handleConfirmAddDuplicateRow}
+        onCancel={handleCancelDuplicatePrompt}
       />
     </div>
   );

@@ -108,6 +108,7 @@ export interface SalesInvoiceRecord {
   invoice_date: string;
   customer_account_id: number;
   customer_name: string;
+  buyer_name?: string;
   customer_code?: string;
   customer_phone?: string;
   customer_address?: string;

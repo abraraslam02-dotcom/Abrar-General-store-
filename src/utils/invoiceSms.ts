@@ -98,12 +98,13 @@ export function generateSalesInvoiceSmsText(rows: DatasheetRow[]): string {
 
 /**
  * Generates the Purchase Invoice Order SMS text from the active Purchase Invoice lines.
- * Format:
+ * Shows Discount Percentage ONLY when discount_percent is valid and greater than 0.
+ * Example:
  *   ABRAR MEDICAL STORE
  *
  *   1 = Panadol (5%)
  *   2 = Brufen (10%)
- *   3 = Syrup (0%)
+ *   3 = Syrup
  */
 export function generatePurchaseOrderSmsText(
   lines: PurchaseLineItem[],
@@ -121,9 +122,16 @@ export function generatePurchaseOrderSmsText(
   const itemLines = populatedLines.map((line, idx) => {
     const sNo = idx + 1;
     const itemName = String(line.item_name || line.item_code || 'Item').trim();
-    const rawDiscount = Number(line.discount_percent);
-    const discountVal = Number.isFinite(rawDiscount) && rawDiscount >= 0 ? rawDiscount : 0;
-    return `${sNo} = ${itemName} (${formatSmsNumber(discountVal)}%)`;
+    const rawVal = line.discount_percent as unknown;
+    const isEmpty =
+      rawVal === null ||
+      rawVal === undefined ||
+      (typeof rawVal === 'string' && rawVal.trim() === '');
+    const numericDiscount = isEmpty ? 0 : Number(rawVal);
+    if (Number.isFinite(numericDiscount) && numericDiscount > 0) {
+      return `${sNo} = ${itemName} (${formatSmsNumber(numericDiscount)}%)`;
+    }
+    return `${sNo} = ${itemName}`;
   });
 
   return `${header}\n\n${itemLines.join('\n')}`;
