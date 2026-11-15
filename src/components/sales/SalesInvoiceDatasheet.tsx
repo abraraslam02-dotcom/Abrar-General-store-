@@ -19,6 +19,8 @@ import { WhatsAppSendButton } from '../common/WhatsAppSendButton';
 import { SimpleSyncStatusBar } from '../common/SimpleSyncStatusBar';
 import { ItemListSelectionModal } from '../common/ItemListSelectionModal';
 import { DuplicateItemConfirmModal } from '../common/DuplicateItemConfirmModal';
+import { SalesPriceHistoryModal } from './SalesPriceHistoryModal';
+import { ItemLogModal } from '../common/ItemLogModal';
 import {
   InvoiceRecordSearchInput,
   InvoiceSearchableItem,
@@ -441,6 +443,28 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const draftRestoredRef = useRef<boolean>(false);
   const cancelledCodeEditRef = useRef<boolean>(false);
   const committedCodeEditRef = useRef<boolean>(false);
+  const [priceHistoryModalState, setPriceHistoryModalState] = useState<{
+    isOpen: boolean;
+    rowIndex: number;
+    returnFocusId: string;
+  }>({
+    isOpen: false,
+    rowIndex: 0,
+    returnFocusId: '',
+  });
+  const [itemLogModalState, setItemLogModalState] = useState<{
+    isOpen: boolean;
+    itemId: number | null;
+    itemCode: string;
+    itemName: string;
+    returnFocusId: string;
+  }>({
+    isOpen: false,
+    itemId: null,
+    itemCode: '',
+    itemName: '',
+    returnFocusId: '',
+  });
 
   // Shortcut Modals
   const [showAdvanceTaxModal, setShowAdvanceTaxModal] = useState<boolean>(false);
@@ -2558,6 +2582,34 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     >;
     const curIdx = posOrder.indexOf(fieldName);
 
+    // Price column keyboard trigger -> Open Customer+Item Sales Price History
+    if (fieldName === 'unit_price' && row?.item_id) {
+      const ignoredKeys = new Set([
+        'Enter', 'Tab', 'Escape',
+        'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+        'Home', 'End', 'PageUp', 'PageDown',
+        'Backspace', 'Delete', 'Insert',
+        'Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'NumLock', 'ScrollLock',
+        'F1', 'F2', 'F3', 'F9',
+      ]);
+      const isTriggerKey =
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !ignoredKeys.has(e.key) &&
+        !/^[0-9.\-]$/.test(e.key);
+      if (isTriggerKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        setSelectedRowIndex(rowIdx);
+        setPriceHistoryModalState({
+          isOpen: true,
+          rowIndex: rowIdx,
+          returnFocusId: `${prefix}_unit_price`,
+        });
+        return;
+      }
+    }
+
     // Forward Enter or Tab
     if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
       e.preventDefault();
@@ -2744,6 +2796,34 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       }
     }
 
+    // Price column keyboard trigger in MS Access Datasheet -> Open Customer+Item Sales Price History
+    if (colName === 'unit_price' && row?.item_id) {
+      const ignoredKeys = new Set([
+        'Enter', 'Tab', 'Escape',
+        'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+        'Home', 'End', 'PageUp', 'PageDown',
+        'Backspace', 'Delete', 'Insert',
+        'Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'NumLock', 'ScrollLock',
+        'F1', 'F2', 'F3', 'F9',
+      ]);
+      const isTriggerKey =
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !ignoredKeys.has(e.key) &&
+        !/^[0-9.\-]$/.test(e.key);
+      if (isTriggerKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        setSelectedRowIndex(rowIndex);
+        setPriceHistoryModalState({
+          isOpen: true,
+          rowIndex,
+          returnFocusId: `cell_${rowIndex}_unit_price`,
+        });
+        return;
+      }
+    }
+
     // Enter key -> Move in exact sequence: Item Selection -> Qty -> Discount -> Loose Qty -> Price -> Bonus Qty -> Loose Rate -> Next Row Item Search
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -2876,6 +2956,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     const handleGlobalShortcuts = (e: KeyboardEvent) => {
       if (
         pendingDuplicatePrompt ||
+        priceHistoryModalState.isOpen ||
+        itemLogModalState.isOpen ||
         showEditSearchModal ||
         showDsrModal ||
         showSalesSmsModal ||
@@ -2932,6 +3014,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     showItemListModal,
     showSearchDropdown,
     pendingDuplicatePrompt,
+    priceHistoryModalState.isOpen,
+    itemLogModalState.isOpen,
     showEditSearchModal,
     showDsrModal,
     showSalesSmsModal,
@@ -3701,6 +3785,21 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                               setSelectedRowIndex(rIdx);
                               setShowSearchDropdown(false);
                             }}
+                            onDoubleClick={(e) => {
+                              if (!row.item_id) return;
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setShowSearchDropdown(false);
+                              setEditingItemName(null);
+                              setItemLogModalState({
+                                isOpen: true,
+                                itemId: row.item_id,
+                                itemCode: row.item_code,
+                                itemName: row.item_name,
+                                returnFocusId: `pos_row_${rIdx}_item_name`,
+                              });
+                            }}
+                            title={row.item_id ? `${row.item_name} — Double-click to open Complete ITEM LOG` : 'Type Item Name / Code (or F2)'}
                             onChange={(e) => {
                               const val = e.target.value;
                               setSelectedRowIndex(rIdx);
@@ -3823,6 +3922,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             onFocus={() => setSelectedRowIndex(rIdx)}
                             onChange={(e) => updateRowField(rIdx, 'unit_price', e.target.value)}
                             onKeyDown={(e) => handlePosFieldKeyDown(e, rIdx, 'unit_price', true)}
+                            title={row.item_id ? 'Sale Price — Press Space, H, or F4 to open Customer Sales Price History' : 'Sale Price'}
                             className="w-full px-1 py-0 text-right font-mono font-bold text-[11px] text-slate-900 border border-transparent focus:border-blue-500 bg-transparent focus:bg-white h-full leading-none outline-none"
                           />
                         </td>
@@ -4914,6 +5014,20 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                               setSelectedRowIndex(rIdx);
                               setShowSearchDropdown(false);
                             }}
+                            onDoubleClick={(e) => {
+                              if (!row.item_id) return;
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setShowSearchDropdown(false);
+                              setEditingItemName(null);
+                              setItemLogModalState({
+                                isOpen: true,
+                                itemId: row.item_id,
+                                itemCode: row.item_code,
+                                itemName: row.item_name,
+                                returnFocusId: `cell_${rIdx}_item_name`,
+                              });
+                            }}
                             onBlur={() => {
                               setTimeout(() => {
                                 setEditingItemName((prev) => (prev?.rowIdx === rIdx ? null : prev));
@@ -4937,6 +5051,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             }}
                             onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'item_name')}
                             placeholder="Type Item Name / Code (or F2)..."
+                            title={row.item_id ? `${row.item_name} — Double-click to open Complete ITEM LOG` : 'Type Item Name / Code (or F2)'}
                             className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white font-semibold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none truncate"
                           />
                           {renderSalesExcelItemCombobox('row', rIdx)}
@@ -4974,6 +5089,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             onFocus={() => setSelectedRowIndex(rIdx)}
                             onChange={(e) => updateRowField(rIdx, 'unit_price', e.target.value)}
                             onKeyDown={(e) => handleCellKeyDown(e, rIdx, 'unit_price')}
+                            title={row.item_id ? 'Sale Price — Press Space, H, or F4 to open Customer Sales Price History' : 'Sale Price'}
                             className="w-full px-1 py-0 border border-transparent focus:border-blue-600 focus:bg-white text-right font-mono font-bold text-slate-900 bg-transparent text-[11px] h-[15px] leading-none outline-none"
                           />
                         </td>
@@ -6327,6 +6443,79 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         itemName={pendingDuplicatePrompt?.item.item_name}
         onConfirmNewRow={handleConfirmAddDuplicateRow}
         onCancel={handleCancelDuplicatePrompt}
+      />
+
+      {/* ================= MODAL 10: CUSTOMER SALES PRICE HISTORY ================= */}
+      <SalesPriceHistoryModal
+        isOpen={priceHistoryModalState.isOpen}
+        itemId={rows[priceHistoryModalState.rowIndex]?.item_id ?? null}
+        itemCode={rows[priceHistoryModalState.rowIndex]?.item_code}
+        itemName={rows[priceHistoryModalState.rowIndex]?.item_name}
+        customerId={customerAccountId}
+        customerName={
+          customerAccountId > 0
+            ? selectedCustomer?.account_name || customerSearchText || 'Selected Customer'
+            : 'Walk-in Cash Customer'
+        }
+        onSelectPrice={(selectedPrice) => {
+          const targetIdx = priceHistoryModalState.rowIndex;
+          const focusId = priceHistoryModalState.returnFocusId;
+          setRows((prev) => {
+            const next = [...prev];
+            const target = next[targetIdx];
+            if (!target) return prev;
+            const newPrice = round2(selectedPrice);
+            const newLoose = target.isLooseRateManuallyEdited
+              ? target.loose_rate
+              : round2(newPrice / Math.max(1, target.units_per_pack));
+            next[targetIdx] = recalcRow({
+              ...target,
+              unit_price: newPrice,
+              loose_rate: newLoose,
+              isRateManuallyEdited: true,
+              rateSuggestionSource: 'customer_last_sale',
+            });
+            return next;
+          });
+          setPriceHistoryModalState((prev) => ({ ...prev, isOpen: false }));
+          if (focusId) {
+            window.setTimeout(() => {
+              const el = document.getElementById(focusId) as HTMLInputElement | null;
+              el?.focus();
+              el?.select?.();
+            }, 25);
+          }
+        }}
+        onClose={() => {
+          const focusId = priceHistoryModalState.returnFocusId;
+          setPriceHistoryModalState((prev) => ({ ...prev, isOpen: false }));
+          if (focusId) {
+            window.setTimeout(() => {
+              const el = document.getElementById(focusId) as HTMLInputElement | null;
+              el?.focus();
+              el?.select?.();
+            }, 25);
+          }
+        }}
+      />
+
+      {/* ================= MODAL 11: COMPLETE ITEM LOG (DOUBLE-CLICK ITEM NAME) ================= */}
+      <ItemLogModal
+        isOpen={itemLogModalState.isOpen}
+        itemId={itemLogModalState.itemId}
+        initialItemCode={itemLogModalState.itemCode}
+        initialItemName={itemLogModalState.itemName}
+        defaultTab="sales"
+        onClose={() => {
+          const focusId = itemLogModalState.returnFocusId;
+          setItemLogModalState((prev) => ({ ...prev, isOpen: false }));
+          if (focusId) {
+            window.setTimeout(() => {
+              const el = document.getElementById(focusId) as HTMLInputElement | null;
+              el?.focus();
+            }, 25);
+          }
+        }}
       />
     </div>
   );

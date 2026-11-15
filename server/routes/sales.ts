@@ -687,8 +687,6 @@ salesRouter.get('/', (req: Request, res: Response) => {
  * GET /api/sales/item-history/:itemId
  * Retrieves:
  * 1) Customer-specific previous sale history for this item (only confirmed 'completed' sales to the selected customer)
- *    - Last Sale Rate to this Customer, Last Discount Given, Last Sale Date, Last Sold Qty, Last Invoice Number
- *    - Previous Sale Rate before the last sale (if available)
  * 2) Last Purchase Cost & Purchase History for this item (from confirmed 'completed' purchases)
  */
 salesRouter.get('/item-history/:itemId', (req: Request, res: Response) => {
@@ -718,35 +716,38 @@ salesRouter.get('/item-history/:itemId', (req: Request, res: Response) => {
             si.id as sale_item_id,
             si.sale_id,
             si.item_id,
-            si.item_code,
-            si.item_name,
+            COALESCE(NULLIF(TRIM(si.item_code), ''), i.item_code, '') as item_code,
+            COALESCE(NULLIF(TRIM(si.item_name), ''), i.item_name, '') as item_name,
             si.packing,
             si.batch_number,
             si.expiry_date,
-            si.quantity,
-            si.loose_quantity,
-            si.total_units,
-            si.unit_price,
-            si.loose_rate,
-            si.discount_percent,
-            si.discount_amount,
-            si.tax_percent,
-            si.tax_amount,
-            si.line_total,
+            COALESCE(si.quantity, 0) as quantity,
+            COALESCE(si.bonus_quantity, 0) as bonus_quantity,
+            COALESCE(si.loose_quantity, 0) as loose_quantity,
+            COALESCE(si.total_units, 0) as total_units,
+            COALESCE(si.unit_price, 0) as unit_price,
+            COALESCE(si.loose_rate, 0) as loose_rate,
+            COALESCE(si.discount_percent, 0) as discount_percent,
+            COALESCE(si.discount_amount, 0) as discount_amount,
+            COALESCE(si.tax_percent, 0) as tax_percent,
+            COALESCE(si.tax_amount, 0) as tax_amount,
+            COALESCE(si.line_total, 0) as line_total,
             s.invoice_number,
             s.invoice_date,
             s.invoice_type,
             s.payment_mode,
             s.customer_account_id,
-            s.customer_name,
-            s.salesman
+            COALESCE(NULLIF(TRIM(s.customer_name), ''), a.account_name, '') as customer_name,
+            COALESCE(s.buyer_name, '') as buyer_name,
+            COALESCE(s.salesman, '') as salesman
           FROM sale_items si
           INNER JOIN sales s ON s.id = si.sale_id
+          LEFT JOIN items i ON i.id = si.item_id
+          LEFT JOIN accounts a ON a.id = s.customer_account_id
           WHERE si.item_id = ?
             AND s.customer_account_id = ?
             AND s.status = 'completed'
-          ORDER BY s.invoice_date DESC, s.id DESC, si.id DESC
-          LIMIT 25
+          ORDER BY s.invoice_date DESC, s.invoice_number DESC, s.id DESC, si.id DESC
         `)
         .all(itemId, customerId) as Array<Record<string, unknown>>;
     }
@@ -754,44 +755,46 @@ salesRouter.get('/item-history/:itemId', (req: Request, res: Response) => {
     const lastCustomerSale = customerSalesHistory.length > 0 ? customerSalesHistory[0] : null;
     const previousCustomerSaleBeforeLast = customerSalesHistory.length > 1 ? customerSalesHistory[1] : null;
 
-    // 2. Confirmed Purchase History for this Item (strictly s.status = 'completed')
+    // 2. Confirmed Purchase History for this Item (strictly p.status = 'completed')
     const purchaseHistory = db
       .prepare(`
         SELECT
           pi.id as purchase_item_id,
           pi.purchase_id,
           pi.item_id,
-          pi.batch_number,
-          pi.manufacturing_date,
-          pi.expiry_date,
-          pi.packing,
-          pi.quantity,
-          pi.bonus_quantity,
-          pi.purchase_price,
-          pi.trade_price,
-          pi.wholesale_price,
-          pi.retail_price,
-          pi.discount_percent,
-          pi.discount_amount,
-          pi.tax_percent,
-          pi.tax_amount,
-          pi.line_total,
+          COALESCE(pi.batch_number, '') as batch_number,
+          COALESCE(pi.manufacturing_date, '') as manufacturing_date,
+          COALESCE(pi.expiry_date, '') as expiry_date,
+          COALESCE(pi.packing, it.packing, '') as packing,
+          COALESCE(pi.quantity, 0) as quantity,
+          COALESCE(pi.bonus_quantity, 0) as bonus_quantity,
+          COALESCE(pi.purchase_rate, 0) as purchase_price,
+          COALESCE(NULLIF(inv.trade_price, 0), it.trade_price, 0) as trade_price,
+          COALESCE(NULLIF(inv.wholesale_price, 0), it.wholesale_price, 0) as wholesale_price,
+          COALESCE(NULLIF(pi.mrp_rate, 0), inv.retail_price, it.retail_price, 0) as retail_price,
+          COALESCE(pi.discount_percent, 0) as discount_percent,
+          COALESCE(pi.discount_amount, 0) as discount_amount,
+          COALESCE(pi.tax_percent, 0) as tax_percent,
+          COALESCE(pi.tax_amount, 0) as tax_amount,
+          COALESCE(pi.line_total, 0) as line_total,
           CASE
-            WHEN (pi.quantity + pi.bonus_quantity) > 0
-            THEN ROUND(pi.line_total / (pi.quantity + pi.bonus_quantity), 2)
-            ELSE pi.purchase_price
+            WHEN (COALESCE(pi.quantity, 0) + COALESCE(pi.bonus_quantity, 0)) > 0
+            THEN ROUND(COALESCE(pi.line_total, 0) / (COALESCE(pi.quantity, 0) + COALESCE(pi.bonus_quantity, 0)), 2)
+            ELSE COALESCE(pi.purchase_rate, 0)
           END as effective_cost_per_pack,
           p.bill_number,
-          p.supplier_invoice_no,
+          COALESCE(p.supplier_invoice_number, '') as supplier_invoice_no,
           p.bill_date,
           p.supplier_account_id,
-          p.supplier_name
+          COALESCE(a.account_name, 'Supplier') as supplier_name
         FROM purchase_items pi
         INNER JOIN purchases p ON p.id = pi.purchase_id
+        LEFT JOIN accounts a ON a.id = p.supplier_account_id
+        LEFT JOIN items it ON it.id = pi.item_id
+        LEFT JOIN inventory inv ON inv.id = pi.inventory_id
         WHERE pi.item_id = ?
           AND p.status = 'completed'
-        ORDER BY p.bill_date DESC, p.id DESC, pi.id DESC
-        LIMIT 25
+        ORDER BY p.bill_date DESC, p.bill_number DESC, p.id DESC, pi.id DESC
       `)
       .all(itemId) as Array<Record<string, unknown>>;
 
@@ -815,12 +818,291 @@ salesRouter.get('/item-history/:itemId', (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/sales/price-history/:itemId?customerId=...
+ * Customer + Item specific Sales Price History (all completed invoices, sorted newest date DESC then invoice_number DESC).
+ */
+salesRouter.get('/price-history/:itemId', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const itemId = Number(req.params.itemId || 0);
+    const customerId = Number(req.query.customerId || 0);
+
+    if (!itemId) {
+      return res.status(400).json({ success: false, error: 'Valid itemId is required.' });
+    }
+
+    const itemRow = db
+      .prepare('SELECT id, item_code, item_name FROM items WHERE id = ?')
+      .get(itemId) as { id: number; item_code: string; item_name: string } | undefined;
+
+    if (!itemRow) {
+      return res.status(404).json({ success: false, error: 'Item not found.' });
+    }
+
+    let customerName = 'Walk-in Cash Customer';
+    if (customerId > 0) {
+      const custRow = db
+        .prepare('SELECT id, account_name FROM accounts WHERE id = ?')
+        .get(customerId) as { id: number; account_name: string } | undefined;
+      if (custRow?.account_name) {
+        customerName = custRow.account_name;
+      }
+    }
+
+    const records =
+      customerId > 0
+        ? (db
+            .prepare(`
+              SELECT
+                si.id as sale_item_id,
+                si.sale_id,
+                s.invoice_date,
+                s.invoice_number,
+                COALESCE(NULLIF(TRIM(si.item_name), ''), i.item_name, '') as item_name,
+                COALESCE(si.quantity, 0) as quantity,
+                COALESCE(si.loose_quantity, 0) as loose_quantity,
+                COALESCE(si.unit_price, 0) as unit_price,
+                COALESCE(si.discount_percent, 0) as discount_percent,
+                COALESCE(si.discount_amount, 0) as discount_amount,
+                COALESCE(si.line_total, 0) as line_total
+              FROM sale_items si
+              INNER JOIN sales s ON s.id = si.sale_id
+              LEFT JOIN items i ON i.id = si.item_id
+              WHERE si.item_id = ?
+                AND s.customer_account_id = ?
+                AND s.status = 'completed'
+              ORDER BY s.invoice_date DESC, s.invoice_number DESC, s.id DESC, si.id DESC
+            `)
+            .all(itemId, customerId) as Array<Record<string, unknown>>)
+        : [];
+
+    return res.json({
+      success: true,
+      itemId,
+      customerId: customerId > 0 ? customerId : null,
+      customerName,
+      itemCode: itemRow.item_code,
+      itemName: itemRow.item_name,
+      records,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ success: false, error: msg });
+  }
+});
+
+/**
+ * GET /api/sales/item-log/:itemId
+ * Complete Item Transaction Log (Item Master header + Live Stock + ALL Sales & ALL Purchases across all parties).
+ */
+salesRouter.get('/item-log/:itemId', (req: Request, res: Response) => {
+  try {
+    const db = getDatabase();
+    const itemId = Number(req.params.itemId || 0);
+
+    if (!itemId) {
+      return res.status(400).json({ success: false, error: 'Valid itemId is required.' });
+    }
+
+    const itemRow = db
+      .prepare(`
+        SELECT
+          id, item_code, item_name, COALESCE(company_name, '') as company_name,
+          COALESCE(generic_name, '') as generic_name, COALESCE(barcode, '') as barcode,
+          COALESCE(packing, '1x1') as packing,
+          COALESCE(purchase_price, 0) as purchase_price,
+          COALESCE(trade_price, 0) as trade_price,
+          COALESCE(wholesale_price, 0) as wholesale_price,
+          COALESCE(retail_price, 0) as retail_price,
+          COALESCE(opening_stock, 0) as opening_stock
+        FROM items
+        WHERE id = ?
+      `)
+      .get(itemId) as Record<string, any> | undefined;
+
+    if (!itemRow) {
+      return res.status(404).json({ success: false, error: 'Item not found.' });
+    }
+
+    const parsed = parsePacking(String(itemRow.packing || '1x1'));
+    const stockAgg = db
+      .prepare(`
+        SELECT
+          COUNT(*) as batch_count,
+          COALESCE(SUM(current_pack_qty), 0) as pack_stock,
+          COALESCE(SUM(total_stock_units), 0) as unit_stock
+        FROM inventory
+        WHERE item_id = ?
+          AND COALESCE(status, 'in_stock') != 'discontinued'
+      `)
+      .get(itemId) as { batch_count: number; pack_stock: number; unit_stock: number };
+
+    const hasBatches = Number(stockAgg?.batch_count || 0) > 0;
+    const currentStockPacks = round2(
+      hasBatches ? stockAgg.pack_stock : Number(itemRow.opening_stock || 0)
+    );
+    const currentStockUnits = round2(
+      hasBatches
+        ? stockAgg.unit_stock
+        : Number(itemRow.opening_stock || 0) * Math.max(1, parsed.unitsPerPack)
+    );
+
+    const rawSales = db
+      .prepare(`
+        SELECT
+          si.id as sale_item_id,
+          si.sale_id,
+          s.invoice_date,
+          s.invoice_number,
+          COALESCE(NULLIF(TRIM(s.customer_name), ''), a.account_name, 'Walk-in Cash Customer') as customer_name,
+          COALESCE(s.buyer_name, '') as buyer_name,
+          COALESCE(NULLIF(TRIM(si.item_code), ''), i.item_code, '') as item_code,
+          COALESCE(NULLIF(TRIM(si.item_name), ''), i.item_name, '') as item_name,
+          COALESCE(si.quantity, 0) as quantity,
+          COALESCE(si.loose_quantity, 0) as loose_quantity,
+          COALESCE(si.bonus_quantity, 0) as bonus_quantity,
+          COALESCE(si.unit_price, 0) as unit_price,
+          COALESCE(si.loose_rate, 0) as loose_rate,
+          COALESCE(si.discount_percent, 0) as discount_percent,
+          COALESCE(si.discount_amount, 0) as discount_amount,
+          COALESCE(si.tax_amount, 0) as tax_amount,
+          COALESCE(si.taxable_amount, 0) as taxable_amount,
+          COALESCE(si.line_total, 0) as line_total,
+          COALESCE(si.units_per_pack, 1) as units_per_pack,
+          COALESCE(si.total_units, 0) as total_units,
+          COALESCE(si.cost_price_per_unit, 0) as cost_price_per_unit
+        FROM sale_items si
+        INNER JOIN sales s ON s.id = si.sale_id
+        LEFT JOIN accounts a ON a.id = s.customer_account_id
+        LEFT JOIN items i ON i.id = si.item_id
+        WHERE si.item_id = ?
+          AND s.status = 'completed'
+        ORDER BY s.invoice_date DESC, s.invoice_number DESC, s.id DESC, si.id DESC
+      `)
+      .all(itemId) as Array<Record<string, any>>;
+
+    const salesHistory = rawSales.map((row) => {
+      const costPerUnit = Number(row.cost_price_per_unit || 0);
+      const totalUnits = Number(row.total_units || 0);
+      const hasReliableCost = costPerUnit > 0 && totalUnits > 0;
+      const netRevenue =
+        Number(row.taxable_amount || 0) > 0
+          ? Number(row.taxable_amount)
+          : Number(row.line_total || 0) - Number(row.tax_amount || 0);
+      const profit = hasReliableCost ? round2(netRevenue - totalUnits * costPerUnit) : null;
+      return {
+        sale_item_id: Number(row.sale_item_id),
+        sale_id: Number(row.sale_id),
+        invoice_date: String(row.invoice_date || ''),
+        invoice_number: String(row.invoice_number || ''),
+        customer_name: String(row.customer_name || ''),
+        buyer_name: String(row.buyer_name || ''),
+        item_code: String(row.item_code || ''),
+        item_name: String(row.item_name || ''),
+        quantity: round2(row.quantity),
+        loose_quantity: round2(row.loose_quantity),
+        bonus_quantity: round2(row.bonus_quantity),
+        unit_price: round2(row.unit_price),
+        loose_rate: round2(row.loose_rate),
+        discount_percent: round2(row.discount_percent),
+        discount_amount: round2(row.discount_amount),
+        tax_amount: round2(row.tax_amount),
+        line_total: round2(row.line_total),
+        units_per_pack: Math.max(1, Number(row.units_per_pack || 1)),
+        total_units: round2(totalUnits),
+        cost_price_per_unit: round2(costPerUnit),
+        has_reliable_cost: hasReliableCost,
+        profit,
+      };
+    });
+
+    const purchaseHistory = db
+      .prepare(`
+        SELECT
+          pi.id as purchase_item_id,
+          pi.purchase_id,
+          p.bill_date as purchase_date,
+          p.bill_number as invoice_number,
+          COALESCE(p.supplier_invoice_number, '') as supplier_invoice_number,
+          COALESCE(a.account_name, 'Supplier') as supplier_name,
+          COALESCE(NULLIF(TRIM(pi.item_code), ''), i.item_code, '') as item_code,
+          COALESCE(NULLIF(TRIM(pi.item_name), ''), i.item_name, '') as item_name,
+          COALESCE(pi.quantity, 0) as quantity,
+          COALESCE(pi.bonus_quantity, 0) as bonus_quantity,
+          COALESCE(pi.batch_number, '') as batch_number,
+          COALESCE(pi.expiry_date, '') as expiry_date,
+          COALESCE(pi.purchase_rate, 0) as purchase_price,
+          COALESCE(NULLIF(inv.trade_price, 0), i.trade_price, 0) as trade_price,
+          COALESCE(pi.discount_percent, 0) as discount_percent,
+          COALESCE(pi.discount_amount, 0) as discount_amount,
+          COALESCE(pi.tax_percent, 0) as tax_percent,
+          COALESCE(pi.tax_amount, 0) as tax_amount,
+          COALESCE(pi.line_total, 0) as line_total
+        FROM purchase_items pi
+        INNER JOIN purchases p ON p.id = pi.purchase_id
+        LEFT JOIN accounts a ON a.id = p.supplier_account_id
+        LEFT JOIN items i ON i.id = pi.item_id
+        LEFT JOIN inventory inv ON inv.id = pi.inventory_id
+        WHERE pi.item_id = ?
+          AND p.status = 'completed'
+        ORDER BY p.bill_date DESC, p.bill_number DESC, p.id DESC, pi.id DESC
+      `)
+      .all(itemId) as Array<Record<string, any>>;
+
+    const totalSoldPacks = round2(salesHistory.reduce((s, r) => s + Number(r.quantity || 0), 0));
+    const totalSoldLooseUnits = round2(salesHistory.reduce((s, r) => s + Number(r.loose_quantity || 0), 0));
+    const totalSoldBonusPacks = round2(salesHistory.reduce((s, r) => s + Number(r.bonus_quantity || 0), 0));
+    const totalPurchasedPacks = round2(purchaseHistory.reduce((s, r) => s + Number(r.quantity || 0), 0));
+    const totalPurchasedBonusPacks = round2(purchaseHistory.reduce((s, r) => s + Number(r.bonus_quantity || 0), 0));
+
+    return res.json({
+      success: true,
+      header: {
+        id: Number(itemRow.id),
+        item_code: String(itemRow.item_code || ''),
+        item_name: String(itemRow.item_name || ''),
+        company_name: String(itemRow.company_name || ''),
+        generic_name: String(itemRow.generic_name || ''),
+        barcode: String(itemRow.barcode || ''),
+        packing: String(itemRow.packing || '1x1'),
+        units_per_pack: parsed.unitsPerPack,
+        current_stock_packs: currentStockPacks,
+        current_stock_units: currentStockUnits,
+        purchase_price: round2(itemRow.purchase_price),
+        trade_price: round2(itemRow.trade_price),
+        wholesale_price: round2(itemRow.wholesale_price),
+        retail_price: round2(itemRow.retail_price),
+      },
+      salesHistory,
+      purchaseHistory,
+      summary: {
+        totalTransactionsCount: salesHistory.length + purchaseHistory.length,
+        totalSalesCount: salesHistory.length,
+        totalSoldPacks,
+        totalSoldLooseUnits,
+        totalSoldBonusPacks,
+        totalPurchasesCount: purchaseHistory.length,
+        totalPurchasedPacks,
+        totalPurchasedBonusPacks,
+      },
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ success: false, error: msg });
+  }
+});
+
+/**
  * GET /api/sales/:id
  * Fetch single Sales Invoice with 14-column line items & double-entry journal lines
  */
 salesRouter.get('/:id', (req: Request, res: Response, next) => {
   const rawId = req.params.id;
-  if (['next-numbers', 'fast-search', 'item-history', 'returns', 'payments', 'ledgers', 'reports'].includes(rawId)) {
+  if (
+    ['next-numbers', 'fast-search', 'item-history', 'price-history', 'item-log', 'returns', 'payments', 'ledgers', 'reports'].includes(
+      rawId
+    )
+  ) {
     return next();
   }
   try {

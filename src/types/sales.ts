@@ -196,6 +196,7 @@ export interface CustomerSaleHistoryEntry {
   payment_mode: string;
   customer_account_id: number;
   customer_name: string;
+  buyer_name?: string;
   salesman: string;
 }
 
@@ -236,6 +237,113 @@ export interface CustomerItemHistoryResponse {
   customerSalesHistory: CustomerSaleHistoryEntry[];
   lastPurchase: ItemPurchaseHistoryEntry | null;
   purchaseHistory: ItemPurchaseHistoryEntry[];
+}
+
+export interface SalesPriceHistoryEntry {
+  sale_item_id: number;
+  sale_id: number;
+  invoice_date: string;
+  invoice_number: string;
+  item_name: string;
+  quantity: number;
+  loose_quantity: number;
+  unit_price: number;
+  discount_percent: number;
+  discount_amount: number;
+  line_total: number;
+}
+
+export interface SalesPriceHistoryResponse {
+  success: boolean;
+  offline?: boolean;
+  itemId: number;
+  customerId: number | null;
+  customerName: string;
+  itemCode: string;
+  itemName: string;
+  records: SalesPriceHistoryEntry[];
+}
+
+export interface CompleteItemLogHeader {
+  id: number;
+  item_code: string;
+  item_name: string;
+  company_name: string;
+  generic_name: string;
+  barcode: string;
+  packing: string;
+  units_per_pack: number;
+  current_stock_packs: number;
+  current_stock_units: number;
+  purchase_price: number;
+  trade_price: number;
+  wholesale_price: number;
+  retail_price: number;
+}
+
+export interface ItemLogSaleRow {
+  sale_item_id: number;
+  sale_id: number;
+  invoice_date: string;
+  invoice_number: string;
+  customer_name: string;
+  buyer_name: string;
+  item_code: string;
+  item_name: string;
+  quantity: number;
+  loose_quantity: number;
+  bonus_quantity: number;
+  unit_price: number;
+  loose_rate: number;
+  discount_percent: number;
+  discount_amount: number;
+  tax_amount: number;
+  line_total: number;
+  units_per_pack: number;
+  total_units: number;
+  cost_price_per_unit: number;
+  has_reliable_cost: boolean;
+  profit: number | null;
+}
+
+export interface ItemLogPurchaseRow {
+  purchase_item_id: number;
+  purchase_id: number;
+  purchase_date: string;
+  invoice_number: string;
+  supplier_invoice_number: string;
+  supplier_name: string;
+  item_code: string;
+  item_name: string;
+  quantity: number;
+  bonus_quantity: number;
+  batch_number: string;
+  expiry_date: string;
+  purchase_price: number;
+  trade_price: number;
+  discount_percent: number;
+  discount_amount: number;
+  tax_percent: number;
+  tax_amount: number;
+  line_total: number;
+}
+
+export interface CompleteItemLogResponse {
+  success: boolean;
+  offline?: boolean;
+  header: CompleteItemLogHeader;
+  salesHistory: ItemLogSaleRow[];
+  purchaseHistory: ItemLogPurchaseRow[];
+  summary: {
+    totalTransactionsCount: number;
+    totalSalesCount: number;
+    totalSoldPacks: number;
+    totalSoldLooseUnits: number;
+    totalSoldBonusPacks: number;
+    totalPurchasesCount: number;
+    totalPurchasedPacks: number;
+    totalPurchasedBonusPacks: number;
+  };
 }
 
 export interface SalesmanRecord {

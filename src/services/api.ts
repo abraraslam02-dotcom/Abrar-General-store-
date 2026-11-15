@@ -19,6 +19,13 @@ import {
 } from '../types/inventory';
 import { offlineStorage } from './offlineStorage';
 import { offlineSyncManager } from './offlineSyncManager';
+import type {
+  CompleteItemLogResponse,
+  ItemLogPurchaseRow,
+  ItemLogSaleRow,
+  SalesPriceHistoryEntry,
+  SalesPriceHistoryResponse,
+} from '../types/sales';
 
 const LEGACY_TOKEN_KEY = 'ams_session_token';
 const LEGACY_CACHED_SESSION_KEY = 'ams_cached_auth_session';
@@ -5667,7 +5674,361 @@ export const api = {
     } catch {
       // Offline fallback
     }
-    return { success: true, offline: true, customerHistory: [], purchaseHistory: [] };
+    const [allSales, allPurchases, allItems, allAccounts] = await Promise.all([
+      offlineStorage.getAll<any>('sales').catch(() => []),
+      offlineStorage.getAll<any>('purchases').catch(() => []),
+      offlineStorage.getAll<any>('items').catch(() => []),
+      offlineStorage.getAll<any>('accounts').catch(() => []),
+    ]);
+    const item = allItems.find((it) => Number(it.id) === Number(itemId)) || {};
+    const accMap = new Map<number, any>(allAccounts.map((a) => [Number(a.id), a]));
+
+    const customerSalesHistory: any[] = [];
+    if (customerId && customerId > 0) {
+      for (const s of allSales) {
+        if (String(s.status || 'completed').toLowerCase() !== 'completed') continue;
+        if (Number(s.customer_account_id) !== Number(customerId)) continue;
+        const lines = Array.isArray(s.items) ? s.items : Array.isArray(s.lines) ? s.lines : [];
+        lines.forEach((ln: any, idx: number) => {
+          if (Number(ln.item_id) !== Number(itemId)) return;
+          customerSalesHistory.push({
+            sale_item_id: Number(ln.id || idx + 1),
+            sale_id: Number(s.server_id || s.id || 0),
+            item_id: Number(itemId),
+            item_code: String(ln.item_code || item.item_code || ''),
+            item_name: String(ln.item_name || item.item_name || ''),
+            packing: String(ln.packing || item.packing || ''),
+            batch_number: String(ln.batch_number || ''),
+            expiry_date: String(ln.expiry_date || ''),
+            quantity: Number(ln.quantity || 0),
+            bonus_quantity: Number(ln.bonus_quantity || 0),
+            loose_quantity: Number(ln.loose_quantity || 0),
+            total_units: Number(ln.total_units || 0),
+            unit_price: Number(ln.unit_price || 0),
+            loose_rate: Number(ln.loose_rate || 0),
+            discount_percent: Number(ln.discount_percent || 0),
+            discount_amount: Number(ln.discount_amount || 0),
+            tax_percent: Number(ln.tax_percent || 0),
+            tax_amount: Number(ln.tax_amount || 0),
+            line_total: Number(ln.line_total || 0),
+            invoice_number: String(s.invoice_number || ''),
+            invoice_date: String(s.invoice_date || ''),
+            invoice_type: String(s.invoice_type || 'Retail'),
+            payment_mode: String(s.payment_mode || 'Cash'),
+            customer_account_id: Number(s.customer_account_id || 0),
+            customer_name: String(s.customer_name || accMap.get(Number(s.customer_account_id))?.account_name || ''),
+            buyer_name: String(s.buyer_name || ''),
+            salesman: String(s.salesman || ''),
+          });
+        });
+      }
+      customerSalesHistory.sort((a, b) => {
+        const dCmp = String(b.invoice_date || '').localeCompare(String(a.invoice_date || ''));
+        if (dCmp !== 0) return dCmp;
+        return String(b.invoice_number || '').localeCompare(String(a.invoice_number || ''), undefined, { numeric: true });
+      });
+    }
+
+    const purchaseHistory: any[] = [];
+    for (const p of allPurchases) {
+      if (String(p.status || 'completed').toLowerCase() !== 'completed') continue;
+      const lines = Array.isArray(p.items) ? p.items : Array.isArray(p.lines) ? p.lines : [];
+      const supAcc = accMap.get(Number(p.supplier_account_id));
+      lines.forEach((ln: any, idx: number) => {
+        if (Number(ln.item_id) !== Number(itemId)) return;
+        const pRate = Number(ln.purchase_rate ?? ln.purchase_price ?? 0);
+        purchaseHistory.push({
+          purchase_item_id: Number(ln.id || idx + 1),
+          purchase_id: Number(p.server_id || p.id || 0),
+          item_id: Number(itemId),
+          batch_number: String(ln.batch_number || ''),
+          manufacturing_date: String(ln.manufacturing_date || ''),
+          expiry_date: String(ln.expiry_date || ''),
+          packing: String(ln.packing || item.packing || ''),
+          quantity: Number(ln.quantity || 0),
+          bonus_quantity: Number(ln.bonus_quantity || 0),
+          purchase_price: pRate,
+          trade_price: Number(ln.trade_price ?? item.trade_price ?? 0),
+          wholesale_price: Number(ln.wholesale_price ?? item.wholesale_price ?? 0),
+          retail_price: Number(ln.mrp_rate ?? ln.retail_price ?? item.retail_price ?? 0),
+          discount_percent: Number(ln.discount_percent || 0),
+          discount_amount: Number(ln.discount_amount || 0),
+          tax_percent: Number(ln.tax_percent || 0),
+          tax_amount: Number(ln.tax_amount || 0),
+          line_total: Number(ln.line_total || 0),
+          effective_cost_per_pack: pRate,
+          bill_number: String(p.bill_number || p.invoice_number || ''),
+          supplier_invoice_no: String(p.supplier_invoice_number || ''),
+          bill_date: String(p.bill_date || p.invoice_date || ''),
+          supplier_account_id: Number(p.supplier_account_id || 0),
+          supplier_name: String(p.supplier_name || supAcc?.account_name || 'Supplier'),
+        });
+      });
+    }
+    purchaseHistory.sort((a, b) => {
+      const dCmp = String(b.bill_date || '').localeCompare(String(a.bill_date || ''));
+      if (dCmp !== 0) return dCmp;
+      return String(b.bill_number || '').localeCompare(String(a.bill_number || ''), undefined, { numeric: true });
+    });
+
+    return {
+      success: true,
+      offline: true,
+      item,
+      customerId: customerId || null,
+      hasCustomerHistory: customerSalesHistory.length > 0,
+      lastCustomerSale: customerSalesHistory[0] || null,
+      previousCustomerSaleBeforeLast: customerSalesHistory[1] || null,
+      customerSalesHistory,
+      lastPurchase: purchaseHistory[0] || null,
+      purchaseHistory,
+    };
+  },
+
+  /**
+   * Customer + Item Sales Price History (Sorted Invoice Date DESC, Invoice Number DESC)
+   */
+  async getSalesPriceHistory(
+    itemId: number,
+    customerId?: number | null
+  ): Promise<SalesPriceHistoryResponse> {
+    const query = new URLSearchParams();
+    if (customerId && customerId > 0) {
+      query.append('customerId', String(customerId));
+    }
+    try {
+      const res = await authFetch(`/api/sales/price-history/${itemId}?${query.toString()}`);
+      const data = await res.json();
+      if (res.ok && data.success) {
+        return data;
+      }
+    } catch {
+      // Offline fallback below
+    }
+
+    const [allSales, allItems, allAccounts] = await Promise.all([
+      offlineStorage.getAll<any>('sales').catch(() => []),
+      offlineStorage.getAll<any>('items').catch(() => []),
+      offlineStorage.getAll<any>('accounts').catch(() => []),
+    ]);
+    const item = allItems.find((it) => Number(it.id) === Number(itemId));
+    const customer = customerId
+      ? allAccounts.find((a) => Number(a.id) === Number(customerId))
+      : null;
+
+    const records: SalesPriceHistoryEntry[] = [];
+    if (customerId && customerId > 0) {
+      for (const s of allSales) {
+        if (String(s.status || 'completed').toLowerCase() !== 'completed') continue;
+        if (Number(s.customer_account_id) !== Number(customerId)) continue;
+        const lines = Array.isArray(s.items) ? s.items : Array.isArray(s.lines) ? s.lines : [];
+        lines.forEach((ln: any, idx: number) => {
+          if (Number(ln.item_id) !== Number(itemId)) return;
+          records.push({
+            sale_item_id: Number(ln.id || idx + 1),
+            sale_id: Number(s.server_id || s.id || 0),
+            invoice_date: String(s.invoice_date || ''),
+            invoice_number: String(s.invoice_number || ''),
+            item_name: String(ln.item_name || item?.item_name || ''),
+            quantity: round2Local(Number(ln.quantity || 0)),
+            loose_quantity: round2Local(Number(ln.loose_quantity || 0)),
+            unit_price: round2Local(Number(ln.unit_price || 0)),
+            discount_percent: round2Local(Number(ln.discount_percent || 0)),
+            discount_amount: round2Local(Number(ln.discount_amount || 0)),
+            line_total: round2Local(Number(ln.line_total || 0)),
+          });
+        });
+      }
+      records.sort((a, b) => {
+        const dCmp = String(b.invoice_date || '').localeCompare(String(a.invoice_date || ''));
+        if (dCmp !== 0) return dCmp;
+        const invCmp = String(b.invoice_number || '').localeCompare(
+          String(a.invoice_number || ''),
+          undefined,
+          { numeric: true }
+        );
+        if (invCmp !== 0) return invCmp;
+        return Number(b.sale_id || 0) - Number(a.sale_id || 0);
+      });
+    }
+
+    return {
+      success: true,
+      offline: true,
+      itemId,
+      customerId: customerId && customerId > 0 ? customerId : null,
+      customerName: String(customer?.account_name || 'Walk-in Cash Customer'),
+      itemCode: String(item?.item_code || ''),
+      itemName: String(item?.item_name || ''),
+      records,
+    };
+  },
+
+  /**
+   * Complete Item Log across ALL Customers & Suppliers (Online SQLite + Offline IndexedDB)
+   */
+  async getCompleteItemLog(itemId: number): Promise<CompleteItemLogResponse> {
+    try {
+      const res = await authFetch(`/api/sales/item-log/${itemId}`);
+      const data = await res.json();
+      if (res.ok && data.success) {
+        return data;
+      }
+    } catch {
+      // Offline fallback below
+    }
+
+    const [allItems, allBatches, allAccounts, allSales, allPurchases] = await Promise.all([
+      offlineStorage.getAll<any>('items').catch(() => []),
+      offlineStorage.getAll<any>('inventory').catch(() => []),
+      offlineStorage.getAll<any>('accounts').catch(() => []),
+      offlineStorage.getAll<any>('sales').catch(() => []),
+      offlineStorage.getAll<any>('purchases').catch(() => []),
+    ]);
+
+    const item = allItems.find((it) => Number(it.id) === Number(itemId)) || {};
+    const accMap = new Map<number, any>(allAccounts.map((a) => [Number(a.id), a]));
+    const itemBatches = allBatches.filter(
+      (b) => Number(b.item_id) === Number(itemId) && String(b.status || 'in_stock') !== 'discontinued'
+    );
+    const unitsPerPack = Math.max(1, Number(itemBatches[0]?.units_per_pack || item.units_per_pack || 1));
+    const currentStockPacks =
+      itemBatches.length > 0
+        ? round2Local(itemBatches.reduce((s, b) => s + Number(b.current_pack_qty || 0), 0))
+        : round2Local(Number(item.opening_stock || 0));
+    const currentStockUnits =
+      itemBatches.length > 0
+        ? round2Local(itemBatches.reduce((s, b) => s + Number(b.total_stock_units || 0), 0))
+        : round2Local(currentStockPacks * unitsPerPack);
+
+    const salesHistory: ItemLogSaleRow[] = [];
+    for (const s of allSales) {
+      if (String(s.status || 'completed').toLowerCase() !== 'completed') continue;
+      const lines = Array.isArray(s.items) ? s.items : Array.isArray(s.lines) ? s.lines : [];
+      const custAcc = accMap.get(Number(s.customer_account_id));
+      lines.forEach((ln: any, idx: number) => {
+        if (Number(ln.item_id) !== Number(itemId)) return;
+        const totalUnits = Number(ln.total_units || 0);
+        const costPerUnit = Number(ln.cost_price_per_unit || 0);
+        const hasReliableCost = costPerUnit > 0 && totalUnits > 0;
+        const lineTotal = round2Local(Number(ln.line_total || 0));
+        const taxAmt = round2Local(Number(ln.tax_amount || 0));
+        const taxableAmt = round2Local(Number(ln.taxable_amount || 0));
+        const netRev = taxableAmt > 0 ? taxableAmt : lineTotal - taxAmt;
+        salesHistory.push({
+          sale_item_id: Number(ln.id || idx + 1),
+          sale_id: Number(s.server_id || s.id || 0),
+          invoice_date: String(s.invoice_date || ''),
+          invoice_number: String(s.invoice_number || ''),
+          customer_name: String(s.customer_name || custAcc?.account_name || 'Walk-in Cash Customer'),
+          buyer_name: String(s.buyer_name || ''),
+          item_code: String(ln.item_code || item.item_code || ''),
+          item_name: String(ln.item_name || item.item_name || ''),
+          quantity: round2Local(Number(ln.quantity || 0)),
+          loose_quantity: round2Local(Number(ln.loose_quantity || 0)),
+          bonus_quantity: round2Local(Number(ln.bonus_quantity || 0)),
+          unit_price: round2Local(Number(ln.unit_price || 0)),
+          loose_rate: round2Local(Number(ln.loose_rate || 0)),
+          discount_percent: round2Local(Number(ln.discount_percent || 0)),
+          discount_amount: round2Local(Number(ln.discount_amount || 0)),
+          tax_amount: taxAmt,
+          line_total: lineTotal,
+          units_per_pack: Math.max(1, Number(ln.units_per_pack || unitsPerPack)),
+          total_units: round2Local(totalUnits),
+          cost_price_per_unit: round2Local(costPerUnit),
+          has_reliable_cost: hasReliableCost,
+          profit: hasReliableCost ? round2Local(netRev - totalUnits * costPerUnit) : null,
+        });
+      });
+    }
+
+    salesHistory.sort((a, b) => {
+      const dCmp = String(b.invoice_date || '').localeCompare(String(a.invoice_date || ''));
+      if (dCmp !== 0) return dCmp;
+      return String(b.invoice_number || '').localeCompare(String(a.invoice_number || ''), undefined, {
+        numeric: true,
+      });
+    });
+
+    const purchaseHistory: ItemLogPurchaseRow[] = [];
+    for (const p of allPurchases) {
+      if (String(p.status || 'completed').toLowerCase() !== 'completed') continue;
+      const lines = Array.isArray(p.items) ? p.items : Array.isArray(p.lines) ? p.lines : [];
+      const supAcc = accMap.get(Number(p.supplier_account_id));
+      lines.forEach((ln: any, idx: number) => {
+        if (Number(ln.item_id) !== Number(itemId)) return;
+        purchaseHistory.push({
+          purchase_item_id: Number(ln.id || idx + 1),
+          purchase_id: Number(p.server_id || p.id || 0),
+          purchase_date: String(p.bill_date || p.invoice_date || ''),
+          invoice_number: String(p.bill_number || p.invoice_number || ''),
+          supplier_invoice_number: String(p.supplier_invoice_number || ''),
+          supplier_name: String(p.supplier_name || supAcc?.account_name || 'Supplier'),
+          item_code: String(ln.item_code || item.item_code || ''),
+          item_name: String(ln.item_name || item.item_name || ''),
+          quantity: round2Local(Number(ln.quantity || 0)),
+          bonus_quantity: round2Local(Number(ln.bonus_quantity || 0)),
+          batch_number: String(ln.batch_number || ''),
+          expiry_date: String(ln.expiry_date || ''),
+          purchase_price: round2Local(Number(ln.purchase_rate ?? ln.purchase_price ?? 0)),
+          trade_price: round2Local(Number(ln.trade_price ?? item.trade_price ?? 0)),
+          discount_percent: round2Local(Number(ln.discount_percent || 0)),
+          discount_amount: round2Local(Number(ln.discount_amount || 0)),
+          tax_percent: round2Local(Number(ln.tax_percent || 0)),
+          tax_amount: round2Local(Number(ln.tax_amount || 0)),
+          line_total: round2Local(Number(ln.line_total || 0)),
+        });
+      });
+    }
+
+    purchaseHistory.sort((a, b) => {
+      const dCmp = String(b.purchase_date || '').localeCompare(String(a.purchase_date || ''));
+      if (dCmp !== 0) return dCmp;
+      return String(b.invoice_number || '').localeCompare(String(a.invoice_number || ''), undefined, {
+        numeric: true,
+      });
+    });
+
+    return {
+      success: true,
+      offline: true,
+      header: {
+        id: Number(itemId),
+        item_code: String(item.item_code || ''),
+        item_name: String(item.item_name || ''),
+        company_name: String(item.company_name || ''),
+        generic_name: String(item.generic_name || ''),
+        barcode: String(item.barcode || ''),
+        packing: String(item.packing || '1x1'),
+        units_per_pack: unitsPerPack,
+        current_stock_packs: currentStockPacks,
+        current_stock_units: currentStockUnits,
+        purchase_price: round2Local(Number(item.purchase_price || 0)),
+        trade_price: round2Local(Number(item.trade_price || 0)),
+        wholesale_price: round2Local(Number(item.wholesale_price || 0)),
+        retail_price: round2Local(Number(item.retail_price || 0)),
+      },
+      salesHistory,
+      purchaseHistory,
+      summary: {
+        totalTransactionsCount: salesHistory.length + purchaseHistory.length,
+        totalSalesCount: salesHistory.length,
+        totalSoldPacks: round2Local(salesHistory.reduce((s, r) => s + Number(r.quantity || 0), 0)),
+        totalSoldLooseUnits: round2Local(
+          salesHistory.reduce((s, r) => s + Number(r.loose_quantity || 0), 0)
+        ),
+        totalSoldBonusPacks: round2Local(
+          salesHistory.reduce((s, r) => s + Number(r.bonus_quantity || 0), 0)
+        ),
+        totalPurchasesCount: purchaseHistory.length,
+        totalPurchasedPacks: round2Local(
+          purchaseHistory.reduce((s, r) => s + Number(r.quantity || 0), 0)
+        ),
+        totalPurchasedBonusPacks: round2Local(
+          purchaseHistory.reduce((s, r) => s + Number(r.bonus_quantity || 0), 0)
+        ),
+      },
+    };
   },
 
   /**

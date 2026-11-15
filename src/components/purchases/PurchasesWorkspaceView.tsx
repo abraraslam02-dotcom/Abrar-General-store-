@@ -59,6 +59,7 @@ import { exportPurchaseInvoicesToExcel } from '../../utils/invoiceExcelExport';
 import { InvoiceSmsModal } from '../common/InvoiceSmsModal';
 import { ItemListSelectionModal } from '../common/ItemListSelectionModal';
 import { DuplicateItemConfirmModal } from '../common/DuplicateItemConfirmModal';
+import { ItemLogModal } from '../common/ItemLogModal';
 import {
   InvoiceRecordSearchInput,
   InvoiceSearchableItem,
@@ -329,6 +330,19 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     item: Item;
     clearRowIdx: number | null;
   } | null>(null);
+  const [itemLogModalState, setItemLogModalState] = useState<{
+    isOpen: boolean;
+    itemId: number | null;
+    itemCode: string;
+    itemName: string;
+    returnFocusId: string;
+  }>({
+    isOpen: false,
+    itemId: null,
+    itemCode: '',
+    itemName: '',
+    returnFocusId: '',
+  });
 
   useEffect(() => {
     setPurchaseRecordJumpInput(String(selectedPurchaseLineIndex + 1));
@@ -2968,6 +2982,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         priceChangePrompt ||
         showPurchaseItemListModal ||
         pendingDuplicatePrompt ||
+        itemLogModalState.isOpen ||
         showAddSupplierModal ||
         showPurchaseSmsModal ||
         printModalOpen
@@ -3005,6 +3020,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     priceChangePrompt,
     showPurchaseItemListModal,
     pendingDuplicatePrompt,
+    itemLogModalState.isOpen,
     showAddSupplierModal,
     showPurchaseSmsModal,
     printModalOpen,
@@ -4037,6 +4053,22 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                     setRowItemSearchQuery('');
                                   }
                                 }}
+                                onDoubleClick={(e) => {
+                                  if (!line.item_id) return;
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setActiveRowItemSearchIdx(null);
+                                  setActiveRowItemSearchField(null);
+                                  setRowItemSearchQuery('');
+                                  setItemLogModalState({
+                                    isOpen: true,
+                                    itemId: Number(line.item_id),
+                                    itemCode: line.item_code,
+                                    itemName: line.item_name,
+                                    returnFocusId: `pos_row_${rIdx}_item_name`,
+                                  });
+                                }}
+                                title={line.item_id ? `${line.item_name} — Double-click to open Complete ITEM LOG` : 'Type Item Name or Code'}
                                 onBlur={() => {
                                   setTimeout(() => {
                                     setActiveRowItemSearchIdx((prev) =>
@@ -5154,6 +5186,22 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                     setRowItemSearchQuery('');
                                   }
                                 }}
+                                onDoubleClick={(e) => {
+                                  if (!line.item_id) return;
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setActiveRowItemSearchIdx(null);
+                                  setActiveRowItemSearchField(null);
+                                  setRowItemSearchQuery('');
+                                  setItemLogModalState({
+                                    isOpen: true,
+                                    itemId: Number(line.item_id),
+                                    itemCode: line.item_code,
+                                    itemName: line.item_name,
+                                    returnFocusId: `pur_cell_${idx}_item_name`,
+                                  });
+                                }}
+                                title={line.item_id ? `${line.item_name} — Double-click to open Complete ITEM LOG` : 'Type Item Name or Code'}
                                 onBlur={() => {
                                   setTimeout(() => {
                                     setActiveRowItemSearchIdx((prev) =>
@@ -6599,6 +6647,24 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         itemCode={pendingDuplicatePrompt?.item.item_code}
         onConfirmNewRow={handleConfirmAddDuplicatePurchaseRow}
         onCancel={handleCancelDuplicatePurchasePrompt}
+      />
+
+      <ItemLogModal
+        isOpen={itemLogModalState.isOpen}
+        itemId={itemLogModalState.itemId}
+        initialItemCode={itemLogModalState.itemCode}
+        initialItemName={itemLogModalState.itemName}
+        defaultTab="purchases"
+        onClose={() => {
+          const focusId = itemLogModalState.returnFocusId;
+          setItemLogModalState((prev) => ({ ...prev, isOpen: false }));
+          if (focusId) {
+            window.setTimeout(() => {
+              const el = document.getElementById(focusId) as HTMLInputElement | null;
+              el?.focus();
+            }, 25);
+          }
+        }}
       />
     </div>
   );
