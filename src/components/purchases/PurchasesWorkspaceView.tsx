@@ -31,6 +31,7 @@ import {
   ArrowLeft,
   MessageSquare,
   PackageSearch,
+  Calculator,
 } from 'lucide-react';
 import { Item } from '../../types/item';
 import { Account, FilerStatus } from '../../types/account';
@@ -343,6 +344,33 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     itemName: '',
     returnFocusId: '',
   });
+
+  // Manual Net Amount Entry Modal State (Triggered by pressing Ctrl in Item Name field)
+  const [netAmountModalState, setNetAmountModalState] = useState<{
+    isOpen: boolean;
+    rowIndex: number;
+    inputValue: string;
+    error: string | null;
+    returnFocusId: string;
+  }>({
+    isOpen: false,
+    rowIndex: 0,
+    inputValue: '',
+    error: null,
+    returnFocusId: '',
+  });
+  const netAmountInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!netAmountModalState.isOpen) return;
+    netAmountInputRef.current?.focus();
+    const rafId = window.requestAnimationFrame(() => {
+      if (netAmountInputRef.current && document.activeElement !== netAmountInputRef.current) {
+        netAmountInputRef.current.focus();
+      }
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, [netAmountModalState.isOpen]);
 
   useEffect(() => {
     setPurchaseRecordJumpInput(String(selectedPurchaseLineIndex + 1));
@@ -1785,6 +1813,118 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     });
   };
 
+  const openNetAmountModalForRow = (rowIdx: number, returnFocusId: string) => {
+    const row = lines[rowIdx];
+    const hasItem = Boolean(row && row.item_id && row.item_id > 0);
+    const qty = round2(Number(row?.quantity || 0));
+    let initialError: string | null = null;
+    if (!Number.isFinite(qty) || qty <= 0) {
+      initialError = 'Quantity is zero or empty. Please enter a valid quantity first.';
+    } else if (!hasItem) {
+      initialError = 'Please select an item in this row first before entering Net Amount.';
+    }
+    setActiveRowItemSearchIdx(null);
+    setActiveRowItemSearchField(null);
+    setRowItemSearchQuery('');
+    setNetAmountModalState({
+      isOpen: true,
+      rowIndex: rowIdx,
+      inputValue: '',
+      error: initialError,
+      returnFocusId,
+    });
+  };
+
+  const handleCloseNetAmountModal = () => {
+    const focusId = netAmountModalState.returnFocusId;
+    setNetAmountModalState((prev) => ({
+      ...prev,
+      isOpen: false,
+      error: null,
+    }));
+    if (focusId) {
+      focusTargetElementById(focusId);
+    }
+  };
+
+  const handleConfirmNetAmount = () => {
+    const rowIdx = netAmountModalState.rowIndex;
+    const row = lines[rowIdx];
+    const qty = round2(Number(row?.quantity || 0));
+    if (!Number.isFinite(qty) || qty <= 0) {
+      setNetAmountModalState((prev) => ({
+        ...prev,
+        error: 'Quantity is zero or empty. Please enter a valid quantity first.',
+      }));
+      return;
+    }
+
+    if (!row || !row.item_id || row.item_id <= 0) {
+      setNetAmountModalState((prev) => ({
+        ...prev,
+        error: 'Please select an item in this row first before entering Net Amount.',
+      }));
+      return;
+    }
+
+    const rawVal = String(netAmountModalState.inputValue ?? '').trim();
+    const enteredNet = Number(rawVal);
+    if (!rawVal || !Number.isFinite(enteredNet) || enteredNet <= 0) {
+      setNetAmountModalState((prev) => ({
+        ...prev,
+        error: 'Please enter a valid Net Amount greater than zero.',
+      }));
+      return;
+    }
+
+    const finalNet = round2(enteredNet);
+    const calculatedPrice = round2(finalNet / qty);
+    const upp = Math.max(1, parseUnitsPerPack(row.packing));
+    const looseRate = row.is_loose_rate_manual
+      ? Math.max(0, round2(Number(row.loose_rate) || 0))
+      : round2(calculatedPrice / upp);
+
+    // Record calculated price as already prompted so Item Master price-change dialog does NOT trigger
+    // and Item Master prices (purchase, trade, wholesale, retail) remain untouched.
+    lastPromptedRateByRowRef.current[rowIdx] = calculatedPrice;
+
+    setLines((prev) => {
+      const copy = [...prev];
+      const currentRow = copy[rowIdx];
+      if (!currentRow) return prev;
+      copy[rowIdx] = {
+        ...currentRow,
+        quantity: qty,
+        loose_quantity: 0,
+        purchase_rate: calculatedPrice,
+        loose_rate: looseRate,
+        discount_percent: 0,
+        discount_amount: 0,
+        gross_amount: finalNet,
+        taxable_amount: finalNet,
+        tax_percent: 0,
+        tax_amount: 0,
+        line_total: finalNet,
+        last_prompted_purchase_rate: calculatedPrice,
+        update_master_purchase_price: false,
+        update_master_retail_price: false,
+      };
+      return ensureMinimumPurchaseRows(copy, visibleRowCapacityRef.current, rowIdx);
+    });
+
+    const focusId = netAmountModalState.returnFocusId;
+    setNetAmountModalState({
+      isOpen: false,
+      rowIndex: rowIdx,
+      inputValue: '',
+      error: null,
+      returnFocusId: '',
+    });
+    if (focusId) {
+      focusTargetElementById(focusId);
+    }
+  };
+
   const addLineRow = () => {
     const emptyIdx = lines.findIndex((l) => !l.item_id || l.item_id === 0);
     const targetIdx = emptyIdx >= 0 ? emptyIdx : lines.length;
@@ -2224,6 +2364,20 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       activeRowItemSearchIdx === rowIdx &&
       rowItemSearchQuery.trim().length > 0 &&
       rowItemSearchResults.length > 0;
+
+    if (
+      field === 'item_name' &&
+      e.key === 'Control' &&
+      !e.repeat &&
+      !e.altKey &&
+      !e.shiftKey &&
+      !e.metaKey
+    ) {
+      e.preventDefault();
+      e.stopPropagation();
+      openNetAmountModalForRow(rowIdx, `${prefix}_${rowIdx}_item_name`);
+      return;
+    }
 
     if (e.key === 'Escape') {
       if (activeRowItemSearchIdx !== null) {
@@ -2983,6 +3137,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         showPurchaseItemListModal ||
         pendingDuplicatePrompt ||
         itemLogModalState.isOpen ||
+        netAmountModalState.isOpen ||
         showAddSupplierModal ||
         showPurchaseSmsModal ||
         printModalOpen
@@ -3021,6 +3176,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     showPurchaseItemListModal,
     pendingDuplicatePrompt,
     itemLogModalState.isOpen,
+    netAmountModalState.isOpen,
     showAddSupplierModal,
     showPurchaseSmsModal,
     printModalOpen,
@@ -6666,6 +6822,133 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           }
         }}
       />
+
+      {/* Manual Net Amount Entry Dialog (Triggered by pressing Ctrl in Purchase Item Name field) */}
+      {netAmountModalState.isOpen && (
+        <div
+          className="fixed inset-0 z-[75] bg-slate-900/60 backdrop-blur-[1px] flex items-center justify-center p-4"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              e.stopPropagation();
+              handleCloseNetAmountModal();
+            }
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="purchase-manual-net-amount-title"
+            className="bg-white rounded-xl border border-slate-300 shadow-2xl w-full max-w-sm overflow-hidden text-xs"
+          >
+            <div className="bg-slate-900 text-white px-4 py-3 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Calculator className="w-4 h-4 text-emerald-400 shrink-0" />
+                <h3 id="purchase-manual-net-amount-title" className="text-xs font-bold">
+                  Manual Net Amount Entry
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={handleCloseNetAmountModal}
+                className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white cursor-pointer"
+                title="Close (Esc)"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <div className="p-4 space-y-3">
+              <p className="text-sm font-bold text-slate-900">
+                Kindly input net amount.
+              </p>
+
+              {lines[netAmountModalState.rowIndex] && (
+                <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 flex items-center justify-between gap-2 text-[11px]">
+                  <div className="truncate">
+                    <span className="text-slate-500">Item: </span>
+                    <span className="font-bold text-slate-900">
+                      {lines[netAmountModalState.rowIndex]?.item_name || 'Not selected'}
+                    </span>
+                  </div>
+                  <div className="shrink-0 font-mono">
+                    <span className="text-slate-500">Qty: </span>
+                    <span className="font-bold text-emerald-700">
+                      {Number(lines[netAmountModalState.rowIndex]?.quantity || 0)}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label
+                  htmlFor="purchase_manual_net_amount_input"
+                  className="block text-[11px] font-semibold text-slate-600 mb-1"
+                >
+                  Total Net Amount (Rs.)
+                </label>
+                <input
+                  id="purchase_manual_net_amount_input"
+                  ref={netAmountInputRef}
+                  type="number"
+                  step="any"
+                  min="0"
+                  autoFocus
+                  value={netAmountModalState.inputValue}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setNetAmountModalState((prev) => ({
+                      ...prev,
+                      inputValue: val,
+                      error: null,
+                    }));
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      handleConfirmNetAmount();
+                    } else if (e.key === 'Escape') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      handleCloseNetAmountModal();
+                    }
+                  }}
+                  placeholder="e.g. 6000"
+                  className="w-full px-3 py-2 text-right font-mono font-bold text-sm text-slate-900 rounded-lg border border-emerald-500 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              {netAmountModalState.error && (
+                <div
+                  role="alert"
+                  className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 flex items-start gap-2 text-[11px] font-semibold"
+                >
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <span>{netAmountModalState.error}</span>
+                </div>
+              )}
+
+              <div className="pt-2 border-t border-slate-100 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={handleCloseNetAmountModal}
+                  className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-bold cursor-pointer"
+                >
+                  Cancel (Esc)
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmNetAmount}
+                  className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold cursor-pointer"
+                >
+                  Confirm (Enter)
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
