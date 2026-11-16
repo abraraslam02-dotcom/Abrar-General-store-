@@ -238,12 +238,22 @@ export function getClientDeviceName(): string {
   }
 }
 
-export function getAuthToken(): string | null {
+function getStoredAuthToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const rawSession =
+      window.sessionStorage.getItem('ams_active_tab_session_v2') ||
+      window.localStorage.getItem('ams_active_auth_session_v2');
+    if (rawSession) {
+      const parsed = JSON.parse(rawSession);
+      if (parsed?.token) return parsed.token;
+    }
+    const legacyToken = window.localStorage.getItem('ams_session_token');
+    if (legacyToken) return legacyToken;
+  } catch {
+    // ignore
+  }
   return null;
-}
-
-export function setAuthToken(_token: string | null, _rememberMe: boolean = false) {
-  purgeLegacyAuthStorage();
 }
 
 export async function authFetch(url: string, init?: RequestInit): Promise<Response> {
@@ -253,6 +263,12 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   }
   if (!headers.has('X-Device-Name')) {
     headers.set('X-Device-Name', getClientDeviceName());
+  }
+  if (!headers.has('Authorization')) {
+    const token = getStoredAuthToken();
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`);
+    }
   }
   const method = String(init?.method || 'GET').toUpperCase();
   const res = await fetch(url, {
@@ -2997,7 +3013,13 @@ export const api = {
           let mergedExtraCount = 0;
           const qLower = String(params?.q || '').trim().toLowerCase();
           for (const loc of existingLocal) {
-            if (loc?.sync_status !== 'pending' && loc?.sync_status !== 'syncing' && loc?.sync_status !== 'failed') {
+            const locSt = String(loc.status || '').toLowerCase();
+            const isHeldOrDraftLoc = locSt === 'held' || locSt === 'draft' || locSt === 'on_hold';
+            const isPendingLoc = loc?.sync_status === 'pending' || loc?.sync_status === 'syncing' || loc?.sync_status === 'failed';
+
+            if (params?.status === 'held_or_draft') {
+              if (!isHeldOrDraftLoc) continue;
+            } else if (!isPendingLoc) {
               continue;
             }
             const key = String(loc?.client_tx_id || '');
