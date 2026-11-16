@@ -3082,9 +3082,13 @@ export const api = {
     }
     let localSales = await offlineStorage.getAll<any>('sales');
     if (params?.status && params.status !== 'all') {
-      localSales = localSales.filter(
-        (s) => String(s.status || '').toLowerCase() === params.status!.toLowerCase()
-      );
+      localSales = localSales.filter((s) => {
+        const st = String(s.status || '').toLowerCase();
+        if (params.status === 'held_or_draft') {
+          return st === 'held' || st === 'draft' || st === 'on_hold';
+        }
+        return st === params.status!.toLowerCase();
+      });
     }
     if (params?.customerId && params.customerId !== 'all') {
       localSales = localSales.filter(
