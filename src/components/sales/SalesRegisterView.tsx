@@ -69,9 +69,14 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
         api.getAccounts({ status: 'Active' }),
       ]);
 
-      setInvoices(salesRes.data || []);
+      const rows = Array.isArray(salesRes.data)
+        ? salesRes.data
+        : Array.isArray(salesRes.sales)
+        ? salesRes.sales
+        : [];
+      setInvoices(rows);
       setSummary(salesRes.summary || {});
-      setTotalCount(Number(salesRes.totalCount || 0));
+      setTotalCount(Number(salesRes.totalCount ?? rows.length));
 
       const custs = (accRes.accounts || accRes.data || []).filter((a: any) =>
         ['Customer', 'Customer & Supplier'].includes(a.account_group)
@@ -89,14 +94,14 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
   }, [fetchRegister]);
 
   const handleOpenView = async (id: number) => {
-    const res = await api.getSaleDetails(id);
-    setViewInvoice(res.data);
+    const res: any = await api.getSaleDetails(id);
+    setViewInvoice(res?.data || res?.invoice || res?.sale || res);
   };
 
   const handleOpenPrint = async (id: number, fmt: 'a4' | '80mm' | '58mm') => {
-    const res = await api.getSaleDetails(id);
+    const res: any = await api.getSaleDetails(id);
     setPrintFormat(fmt);
-    setPrintInvoice(res.data);
+    setPrintInvoice(res?.data || res?.invoice || res?.sale || res);
   };
 
   const handleDeleteHeld = async (id: number) => {
@@ -330,16 +335,35 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
                 invoices.map((inv) => (
                   <tr
                     key={inv.id}
-                    className="border-b border-slate-200 hover:bg-slate-50 transition-colors"
+                    onClick={() => {
+                      if (mode === 'held_or_draft' && onResumeInvoice) {
+                        onResumeInvoice(inv.id);
+                      }
+                    }}
+                    onDoubleClick={() => {
+                      if (mode === 'held_or_draft' && onResumeInvoice) {
+                        onResumeInvoice(inv.id);
+                      }
+                    }}
+                    className={`border-b border-slate-200 transition-colors ${
+                      mode === 'held_or_draft' && onResumeInvoice
+                        ? 'cursor-pointer hover:bg-emerald-50/70'
+                        : 'hover:bg-slate-50'
+                    }`}
                   >
                     <td className="px-3 py-2 font-mono font-bold text-slate-900">
                       {inv.invoice_number}
                       <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
                         {inv.invoice_type}
                       </span>
+                      <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 uppercase font-bold">
+                        {inv.status}
+                      </span>
                     </td>
                     <td className="px-3 py-2 font-mono text-slate-700">{inv.invoice_date}</td>
-                    <td className="px-3 py-2 font-semibold text-slate-900">{inv.customer_name}</td>
+                    <td className="px-3 py-2 font-semibold text-slate-900">
+                      {inv.customer_name || 'Walk-in Cash Customer'}
+                    </td>
                     <td className="px-3 py-2 text-right font-mono font-bold text-slate-900">
                       {formatPKR(inv.net_total)}
                     </td>
@@ -361,7 +385,7 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
                     <td className="px-3 py-2 text-center">
                       <RecordSyncBadge syncStatus={(inv as any).sync_status} />
                     </td>
-                    <td className="px-3 py-2 text-right">
+                    <td className="px-3 py-2 text-right" onClick={(e) => e.stopPropagation()}>
                       <div className="inline-flex items-center gap-1">
                         {mode === 'held_or_draft' && onResumeInvoice ? (
                           <>

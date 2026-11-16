@@ -516,14 +516,17 @@ salesRouter.get('/', (req: Request, res: Response) => {
     let whereSql = ' WHERE 1=1 ';
     const params: Array<string | number> = [];
 
-    if (status && status !== 'All') {
-      if (status === 'held_or_draft') {
-        whereSql += " AND s.status IN ('draft', 'held') ";
-      } else if (status === 'register') {
-        whereSql += " AND s.status IN ('completed', 'cancelled') ";
+    if (status && String(status).trim().toLowerCase() !== 'all') {
+      const normStatus = String(status).trim().toLowerCase();
+      if (normStatus === 'held_or_draft') {
+        whereSql += " AND LOWER(TRIM(COALESCE(s.status, ''))) IN ('draft', 'held', 'on_hold', 'on hold', 'hold') ";
+      } else if (['held', 'on_hold', 'on hold', 'hold'].includes(normStatus)) {
+        whereSql += " AND LOWER(TRIM(COALESCE(s.status, ''))) IN ('held', 'on_hold', 'on hold', 'hold') ";
+      } else if (normStatus === 'register') {
+        whereSql += " AND LOWER(TRIM(COALESCE(s.status, ''))) IN ('completed', 'posted', 'cancelled') ";
       } else {
-        whereSql += ' AND s.status = ? ';
-        params.push(String(status));
+        whereSql += " AND LOWER(TRIM(COALESCE(s.status, ''))) = ? ";
+        params.push(normStatus);
       }
     }
 
@@ -605,13 +608,14 @@ salesRouter.get('/', (req: Request, res: Response) => {
     const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
     const limitNum = isExportAll
       ? 10000
-      : Math.min(500, Math.max(10, parseInt(String(pageSize), 10) || 50));
+      : Math.min(1000, Math.max(10, parseInt(String(pageSize), 10) || 50));
     const offset = isExportAll ? 0 : (pageNum - 1) * limitNum;
 
     const rows = db
       .prepare(`
         SELECT
           s.*,
+          COALESCE(NULLIF(TRIM(s.customer_name), ''), a.account_name, 'Walk-in Cash Customer') as customer_name,
           COALESCE(s.paid_amount, 0) as paid_amount,
           COALESCE(s.buyer_name, '') as buyer_name,
           a.account_code as customer_code,
@@ -1205,6 +1209,7 @@ salesRouter.get('/:id', (req: Request, res: Response, next) => {
       .prepare(`
         SELECT
           s.*,
+          COALESCE(NULLIF(TRIM(s.customer_name), ''), a.account_name, 'Walk-in Cash Customer') as customer_name,
           COALESCE(s.paid_amount, 0) as paid_amount,
           COALESCE(s.buyer_name, '') as buyer_name,
           a.account_code as customer_code,
@@ -1292,7 +1297,12 @@ export function processSaleUpsert(saleId: number | null, body: Record<string, un
     }
 
     const rawSaleStatus = String(body.status || 'completed').trim().toLowerCase();
-    const status = rawSaleStatus === 'confirmed' ? 'completed' : rawSaleStatus;
+    const status =
+      rawSaleStatus === 'confirmed' || rawSaleStatus === 'posted'
+        ? 'completed'
+        : ['on_hold', 'on hold', 'hold'].includes(rawSaleStatus)
+        ? 'held'
+        : rawSaleStatus;
     if (!['draft', 'held', 'completed'].includes(status)) {
       throw new Error('Invalid invoice status. Must be draft, held, or completed.');
     }
@@ -2492,15 +2502,28 @@ salesRouter.put('/:id', (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: 'Sales invoice not found.' });
     }
 
-    if (existing.status === 'cancelled') {
+    const existingStatus = String(existing.status || '').trim().toLowerCase();
+    if (existingStatus === 'cancelled') {
       return res.status(400).json({
         success: false,
         error: 'Cancelled invoices are permanently locked and cannot be edited.',
       });
     }
 
+    const reqClientId = req.body?.client_request_id ? String(req.body.client_request_id).trim() : '';
+    if (
+      existingStatus === 'completed' &&
+      (req.body?.from_hold_conversion || (reqClientId && existing.client_request_id === reqClientId))
+    ) {
+      return res.status(409).json({
+        success: false,
+        alreadyPosted: true,
+        error: `Held invoice "${existing.invoice_number}" has already been posted and cannot be posted twice.`,
+      });
+    }
+
     // Protect posted (completed) invoices from unauthorized editing
-    if (existing.status === 'completed') {
+    if (existingStatus === 'completed') {
       const role = req.user?.role || '';
       if (role !== 'Super Admin' && role !== 'Administrator') {
         return res.status(403).json({
@@ -2521,10 +2544,24 @@ salesRouter.put('/:id', (req: Request, res: Response) => {
     }
 
     const username = req.user?.username || 'Super Admin';
-    processSaleUpsert(saleId, req.body || {});
-    db.prepare('UPDATE sales SET updated_by = ? WHERE id = ?').run(username, saleId);
+    const updateTx = db.transaction(() => {
+      processSaleUpsert(saleId, req.body || {});
+      db.prepare('UPDATE sales SET updated_by = ?, client_request_id = COALESCE(?, client_request_id) WHERE id = ?').run(
+        username,
+        reqClientId || null,
+        saleId
+      );
+    });
+    updateTx();
 
-    const updated = db.prepare('SELECT * FROM sales WHERE id = ?').get(saleId) as Record<string, unknown>;
+    const updated = db
+      .prepare(`
+        SELECT s.*, COALESCE(NULLIF(TRIM(s.customer_name), ''), a.account_name, 'Walk-in Cash Customer') as customer_name
+        FROM sales s
+        LEFT JOIN accounts a ON s.customer_account_id = a.id
+        WHERE s.id = ?
+      `)
+      .get(saleId) as Record<string, unknown>;
     const items = db.prepare('SELECT * FROM sale_items WHERE sale_id = ?').all(saleId);
 
     db.prepare(

@@ -93,6 +93,11 @@ interface PurchasesWorkspaceViewProps {
 export const INITIAL_PURCHASE_ROWS = 15;
 const ACTIVE_PURCHASE_DRAFT_KEY = 'ams_active_purchase_draft_v2';
 
+const isHeldPurchaseStatus = (status: unknown): boolean => {
+  const s = String(status || '').trim().toLowerCase();
+  return s === 'held' || s === 'draft' || s === 'on_hold' || s === 'on hold' || s === 'hold';
+};
+
 function calculateRetailFromPurchasePrice(newPurchasePrice: number): {
   retailBase: number;
   roundedRetailPrice: number;
@@ -211,6 +216,11 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
   // Purchase Invoice Form State
   const [editingPurchaseId, setEditingPurchaseId] = useState<number | null>(null);
+  const editingPurchaseIdRef = useRef<number | null>(null);
+  const isResumingPurchaseRef = useRef<boolean>(false);
+  useEffect(() => {
+    editingPurchaseIdRef.current = editingPurchaseId;
+  }, [editingPurchaseId]);
   const [billNumber, setBillNumber] = useState('Inv-2026-11-01');
   const [billDate, setBillDate] = useState(new Date().toISOString().slice(0, 10));
   const [supplierId, setSupplierId] = useState<string>('');
@@ -599,8 +609,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         api.getAccounts({ status: 'Active' }).catch(() => ({ accounts: [] })),
         api.fastSearchPurchaseSuppliers('', 60).catch(() => ({ suppliers: [] })),
         api.getAdvanceTaxSettings().catch(() => ({ settings: null, history: [] })),
-        api.getPurchases().catch(() => ({ purchases: [] })),
-        api.getPurchases({ status: 'held_or_draft' }).catch(() => ({ purchases: [] })),
+        api.getPurchases().catch(() => ({ purchases: [], data: [] })),
+        api.getPurchases({ status: 'held_or_draft', exportAll: true }).catch(() => ({ purchases: [], data: [] })),
         api.getPurchaseReturns().catch(() => ({ returns: [] })),
         api.getInventoryBatches().catch(() => ({ batches: [] })),
       ]);
@@ -629,11 +639,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
           : fastSupRes.suppliers || fastSupRes.data || [];
       setSuppliers(supList);
 
-      // Auto-select first supplier if none selected yet (just like Sales auto-selects default Customer!)
-      // Never auto-select a supplier: a new invoice must start with an empty supplier field.
-      setSupplierId((prevSupId) =>
-        prevSupId && supList.some((s) => String(s.id) === String(prevSupId)) ? prevSupId : ''
-      );
+      // Never auto-select a supplier on a new invoice, and never clobber supplierId while editing/resuming a held invoice.
+      setSupplierId((prevSupId) => {
+        if (editingPurchaseIdRef.current || isResumingPurchaseRef.current) {
+          return prevSupId;
+        }
+        return prevSupId && supList.some((s) => String(s.id) === String(prevSupId)) ? prevSupId : '';
+      });
 
       const finList = allAccounts.filter((a) =>
         ['Cash in Hand', 'Bank'].includes(a.account_group)
@@ -645,7 +657,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
       if (nextNumsRes.nextPurchaseNumber) {
         setNextPurchaseNo(nextNumsRes.nextPurchaseNumber);
-        if (!editingPurchaseId) {
+        if (!editingPurchaseIdRef.current && !isResumingPurchaseRef.current) {
           setBillNumber(nextNumsRes.nextPurchaseNumber);
           setSupplierInvoiceNumber((prev) => prev || nextNumsRes.nextPurchaseNumber);
         }
@@ -654,8 +666,18 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         setNextReturnNo(nextNumsRes.nextReturnNumber);
       }
 
-      setPurchases(purchasesRes.purchases || []);
-      setHeldPurchases(heldRes.purchases || []);
+      const rawRegister: PurchaseInvoice[] = Array.isArray((purchasesRes as any)?.purchases)
+        ? (purchasesRes as any).purchases
+        : Array.isArray((purchasesRes as any)?.data)
+        ? (purchasesRes as any).data
+        : [];
+      const rawHeld: PurchaseInvoice[] = Array.isArray((heldRes as any)?.purchases)
+        ? (heldRes as any).purchases
+        : Array.isArray((heldRes as any)?.data)
+        ? (heldRes as any).data
+        : [];
+      setPurchases(rawRegister);
+      setHeldPurchases(rawHeld.filter((h) => isHeldPurchaseStatus(h.status)));
       setReturns(returnsRes.returns || []);
       setBatches(batchesRes.batches || []);
     } catch (err: unknown) {
@@ -668,18 +690,36 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
   const fetchHeldPurchases = useCallback(async () => {
     try {
       setLoadingHeld(true);
-      const res = await api.getPurchases({ status: 'held_or_draft' });
-      setHeldPurchases(res.purchases || []);
-    } catch {
-      // ignore
+      const res: any = await api.getPurchases({ status: 'held_or_draft', exportAll: true });
+      const rawHeld: PurchaseInvoice[] = Array.isArray(res?.purchases)
+        ? res.purchases
+        : Array.isArray(res?.data)
+        ? res.data
+        : [];
+      setHeldPurchases(rawHeld.filter((h) => isHeldPurchaseStatus(h.status)));
+    } catch (err) {
+      console.error('Failed to fetch held purchases:', err);
     } finally {
       setLoadingHeld(false);
     }
   }, []);
 
+  const openHeldPurchasesModal = useCallback(async () => {
+    setShowHeldModal(true);
+    await fetchHeldPurchases();
+  }, [fetchHeldPurchases]);
+
   useEffect(() => {
     fetchWorkspaceData();
   }, [fetchWorkspaceData]);
+
+  useEffect(() => {
+    const handleSyncDone = () => {
+      fetchHeldPurchases();
+    };
+    window.addEventListener('ams-sync-completed', handleSyncDone);
+    return () => window.removeEventListener('ams-sync-completed', handleSyncDone);
+  }, [fetchHeldPurchases]);
 
   // Automatically update next read-only Purchase Invoice Number when billDate month/year changes on a new invoice
   useEffect(() => {
@@ -2631,6 +2671,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     } catch {
       // ignore
     }
+    editingPurchaseIdRef.current = null;
     setEditingPurchaseId(null);
     setSupplierId('');
     setSupplierSearchQuery('');
@@ -2671,21 +2712,34 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
   // Resume specific Held / Draft purchase invoice into the datasheet
   const handleResumeHeldPurchase = async (purId: number) => {
+    isResumingPurchaseRef.current = true;
     try {
       setFormError(null);
-      const res = await api.getPurchaseDetails(purId);
-      const p = res.purchase;
+      const res: any = await api.getPurchaseDetails(purId);
+      const p = res?.purchase || res?.data || res;
+      if (!p || !p.id) {
+        throw new Error('Held purchase invoice could not be found in the active database.');
+      }
+      const rawItems = Array.isArray(res?.items) ? res.items : Array.isArray(p?.items) ? p.items : [];
+
+      try {
+        localStorage.removeItem(ACTIVE_PURCHASE_DRAFT_KEY);
+      } catch {
+        // ignore
+      }
+
+      editingPurchaseIdRef.current = p.id;
       setEditingPurchaseId(p.id);
-      setBillNumber(p.bill_number);
+      setBillNumber(p.bill_number || '');
       setSupplierInvoiceNumber(p.supplier_invoice_number || '');
       setBillDate(p.bill_date || new Date().toISOString().slice(0, 10));
-      setSupplierId(String(p.supplier_account_id));
+      setSupplierId(p.supplier_account_id ? String(p.supplier_account_id) : '');
       setSupplierFilerStatus(p.supplier_filer_status || 'Filer');
       setNotes(p.remarks || '');
       setInvoiceDiscountPercent(Number(p.invoice_discount_percent || 0));
       setInvoiceDiscountAmount(Number(p.invoice_discount_amount || 0));
       setIsTaxOverridden(Boolean(p.is_tax_overridden));
-      setCustomAdvanceTaxRate(Number(p.advance_tax_rate || 0.5));
+      setCustomAdvanceTaxRate(Number(p.advance_tax_rate ?? 0.5));
       setTaxOverrideReason(p.tax_override_reason || '');
       setTaxOverrideAuthorizedBy(p.tax_override_authorized_by || 'Chief Pharmacist / Admin');
       setPaymentMode(p.payment_mode || 'Credit');
@@ -2693,8 +2747,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       setPaidAmount(Math.max(0, Number(p.paid_amount ?? 0)));
       setPaidAmountManuallyEdited(true);
 
-      const loadedItems: PurchaseLineItem[] = (res.items || []).map((it: any) => {
-        const upp = Math.max(1, it.units_per_pack || parseUnitsPerPack(it.packing));
+      const loadedItems: PurchaseLineItem[] = rawItems.map((it: any) => {
+        const upp = Math.max(1, Number(it.units_per_pack || parseUnitsPerPack(it.packing)));
         const pRate = Number(it.purchase_rate || 0);
         const lRate =
           it.loose_rate !== undefined && Number(it.loose_rate) > 0
@@ -2703,7 +2757,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         return {
           id: it.id,
           purchase_id: it.purchase_id,
-          item_id: it.item_id,
+          item_id: Number(it.item_id || 0),
           inventory_id: it.inventory_id,
           item_code: it.item_code || '',
           company_name: it.company_name || '',
@@ -2730,18 +2784,16 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       });
 
       setLines(ensureMinimumPurchaseRows(loadedItems, visibleRowCapacityRef.current, 0));
+      setSelectedPurchaseLineIndex(0);
       setShowHeldModal(false);
       setSubTab('new-invoice');
-      try {
-        localStorage.removeItem(ACTIVE_PURCHASE_DRAFT_KEY);
-      } catch {
-        // ignore
-      }
       setFormSuccess(
         `Held purchase draft ${p.bill_number} resumed into datasheet. You can now edit lines or click Save to confirm.`
       );
     } catch (err: unknown) {
       setFormError(err instanceof Error ? err.message : String(err));
+    } finally {
+      isResumingPurchaseRef.current = false;
     }
   };
 
@@ -2817,6 +2869,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     targetStatus: 'completed' | 'held' = 'completed'
   ) => {
     if (e) e.preventDefault();
+    if (savingInvoice) return;
     setFormError(null);
     setFormSuccess(null);
 
@@ -2891,6 +2944,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       paid_amount: round2(paidAmount),
       remarks: notes,
       status: targetStatus,
+      from_hold_conversion: Boolean(editingPurchaseId && targetStatus === 'completed'),
       client_request_id: clientRequestId,
       items: sanitizedItems,
     };
@@ -2898,9 +2952,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     try {
       setSavingInvoice(true);
       if (editingPurchaseId) {
-        const res = await api.updatePurchase(editingPurchaseId, payload);
-        const savedId = res.purchase?.id || editingPurchaseId;
+        const postedPurId = editingPurchaseId;
+        const res = await api.updatePurchase(postedPurId, payload);
+        const savedId = res.purchase?.id || postedPurId;
         const savedBillNo = res.purchase?.bill_number || billNumber;
+        if (targetStatus === 'completed') {
+          setHeldPurchases((prev) => prev.filter((h) => Number(h.id) !== Number(postedPurId)));
+        }
         setFormSuccess(
           targetStatus === 'held'
             ? `Purchase Invoice held successfully (Draft #${savedBillNo}). No stock or ledger was affected.`
@@ -3259,22 +3317,37 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
 
   // Load Purchase Invoice into Edit Form
   const handleEditPurchase = async (purId: number) => {
+    isResumingPurchaseRef.current = true;
     try {
-      const res = await api.getPurchaseDetails(purId);
-      const p: PurchaseInvoice = res.purchase;
-      const pItems: PurchaseLineItem[] = res.items || [];
+      const res: any = await api.getPurchaseDetails(purId);
+      const p: PurchaseInvoice = res?.purchase || res?.data || res;
+      if (!p || !p.id) {
+        throw new Error('Purchase invoice could not be found in the active database.');
+      }
+      const pItems: PurchaseLineItem[] = Array.isArray(res?.items)
+        ? res.items
+        : Array.isArray((p as any)?.items)
+        ? (p as any).items
+        : [];
 
+      try {
+        localStorage.removeItem(ACTIVE_PURCHASE_DRAFT_KEY);
+      } catch {
+        // ignore
+      }
+
+      editingPurchaseIdRef.current = p.id;
       setEditingPurchaseId(p.id);
-      setBillNumber(p.bill_number);
-      setBillDate(p.bill_date);
-      setSupplierId(String(p.supplier_account_id));
+      setBillNumber(p.bill_number || '');
+      setBillDate(p.bill_date || new Date().toISOString().slice(0, 10));
+      setSupplierId(p.supplier_account_id ? String(p.supplier_account_id) : '');
       setSupplierInvoiceNumber(p.supplier_invoice_number || '');
       setSupplierFilerStatus(p.supplier_filer_status || 'Filer');
       setNotes(p.remarks || '');
-      setInvoiceDiscountPercent(p.invoice_discount_percent || 0);
-      setInvoiceDiscountAmount(p.invoice_discount_amount || 0);
-      setIsTaxOverridden(p.is_tax_overridden === 1);
-      setCustomAdvanceTaxRate(p.advance_tax_rate);
+      setInvoiceDiscountPercent(Number(p.invoice_discount_percent || 0));
+      setInvoiceDiscountAmount(Number(p.invoice_discount_amount || 0));
+      setIsTaxOverridden(Number(p.is_tax_overridden) === 1 || Boolean(p.is_tax_overridden));
+      setCustomAdvanceTaxRate(Number(p.advance_tax_rate ?? 0.5));
       setTaxOverrideReason(p.tax_override_reason || '');
       setTaxOverrideAuthorizedBy(p.tax_override_authorized_by || 'Chief Pharmacist / Admin');
       setPaymentMode(p.payment_mode || 'Credit');
@@ -3282,7 +3355,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       setPaidAmount(Math.max(0, Number(p.paid_amount ?? 0)));
       setPaidAmountManuallyEdited(true);
       const normalizedItems: PurchaseLineItem[] = pItems.map((it: any) => {
-        const upp = Math.max(1, it.units_per_pack || parseUnitsPerPack(it.packing));
+        const upp = Math.max(1, Number(it.units_per_pack || parseUnitsPerPack(it.packing)));
         const pRate = Number(it.purchase_rate || 0);
         const lRate =
           it.loose_rate !== undefined && Number(it.loose_rate) > 0
@@ -3290,9 +3363,21 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
             : round2(pRate / upp);
         return {
           ...it,
+          item_id: Number(it.item_id || 0),
           units_per_pack: upp,
+          quantity: Number(it.quantity || 0),
           loose_quantity: Number(it.loose_quantity || 0),
+          bonus_quantity: Number(it.bonus_quantity || 0),
+          purchase_rate: pRate,
           loose_rate: lRate,
+          mrp_rate: Number(it.mrp_rate || 0),
+          gross_amount: Number(it.gross_amount || 0),
+          discount_percent: Number(it.discount_percent || 0),
+          discount_amount: Number(it.discount_amount || 0),
+          taxable_amount: Number(it.taxable_amount || 0),
+          tax_percent: Number(it.tax_percent || 0),
+          tax_amount: Number(it.tax_amount || 0),
+          line_total: Number(it.line_total || 0),
         };
       });
       setLines(ensureMinimumPurchaseRows(normalizedItems, visibleRowCapacityRef.current, 0));
@@ -3300,6 +3385,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
       setSubTab('new-invoice');
     } catch (err: unknown) {
       setFormError(err instanceof Error ? err.message : String(err));
+    } finally {
+      isResumingPurchaseRef.current = false;
     }
   };
 
@@ -3895,7 +3982,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setShowHeldModal(true)}
+                      onClick={openHeldPurchasesModal}
                       className="px-1.5 py-0 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200 font-bold flex items-center gap-0.5 cursor-pointer"
                       title="Held Drafts"
                     >
@@ -4935,7 +5022,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => setShowHeldModal(true)}
+                    onClick={openHeldPurchasesModal}
                     className="px-1.5 py-0 rounded bg-indigo-700 hover:bg-indigo-600 text-white font-bold flex items-center gap-0.5 cursor-pointer"
                     title="View Held Purchase Drafts"
                   >
@@ -6579,7 +6666,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {heldPurchases.length === 0 ? (
+                  {loadingHeld && heldPurchases.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="p-8 text-center text-slate-500">
+                        <p className="font-semibold">Loading held purchase invoices from active database...</p>
+                      </td>
+                    </tr>
+                  ) : heldPurchases.length === 0 ? (
                     <tr>
                       <td colSpan={7} className="p-8 text-center text-slate-400">
                         <PauseCircle className="w-8 h-8 text-slate-300 mx-auto mb-2" />
@@ -6591,10 +6684,18 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                     </tr>
                   ) : (
                     heldPurchases.map((h) => (
-                      <tr key={h.id} className="hover:bg-slate-50 transition-colors">
+                      <tr
+                        key={h.id}
+                        onClick={() => handleResumeHeldPurchase(h.id)}
+                        onDoubleClick={() => handleResumeHeldPurchase(h.id)}
+                        className="hover:bg-amber-50/70 transition-colors cursor-pointer"
+                        title="Click or double-click to open this held purchase invoice in the datasheet"
+                      >
                         <td className="px-3 py-2 font-mono font-bold text-slate-900">{h.bill_number}</td>
                         <td className="px-3 py-2 font-mono text-slate-600">{h.bill_date}</td>
-                        <td className="px-3 py-2 font-semibold text-slate-800">{h.supplier_name || 'N/A'}</td>
+                        <td className="px-3 py-2 font-semibold text-slate-800">
+                          {h.supplier_name || 'Unspecified Supplier'}
+                        </td>
                         <td className="px-3 py-2 text-center font-mono text-slate-600">
                           {h.item_count ?? '—'} Items ({h.total_packs ?? '—'} Pk)
                         </td>
@@ -6604,12 +6705,15 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                           </span>
                         </td>
                         <td className="px-3 py-2 text-right font-mono font-bold text-slate-900">
-                          {formatPKR(h.net_total)}
+                          {formatPKR(h.net_total ?? (h as any).total_amount ?? 0)}
                         </td>
                         <td className="px-3 py-2 text-right space-x-1 whitespace-nowrap">
                           <button
                             type="button"
-                            onClick={() => handleResumeHeldPurchase(h.id)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleResumeHeldPurchase(h.id);
+                            }}
                             className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold cursor-pointer text-[10px]"
                             title="Resume this draft in datasheet"
                           >
@@ -6617,7 +6721,10 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                           </button>
                           <button
                             type="button"
-                            onClick={() => handleDiscardHeldPurchase(h.id, h.bill_number)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDiscardHeldPurchase(h.id, h.bill_number);
+                            }}
                             className="px-2 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold cursor-pointer text-[10px]"
                             title="Discard draft permanently"
                           >

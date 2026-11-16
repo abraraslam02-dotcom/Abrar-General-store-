@@ -758,8 +758,11 @@ syncRouter.post('/push', (req: Request, res: Response) => {
           if (!targetId || Number.isNaN(targetId)) {
             throw new Error('Valid numeric sale ID is required for UPDATE_SALE');
           }
-          const existingSaleRow = db.prepare('SELECT id, invoice_number, created_at, updated_at FROM sales WHERE id = ?').get(targetId) as any;
-          if (isIncomingStale(existingSaleRow, payload)) {
+          const existingSaleRow = db.prepare('SELECT id, invoice_number, status, created_at, updated_at FROM sales WHERE id = ?').get(targetId) as any;
+          const incomingSaleSt = String(payload.status || '').trim().toLowerCase();
+          const isIncomingHeldSale = ['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(incomingSaleSt);
+          const isExistingCompletedSale = ['completed', 'posted'].includes(String(existingSaleRow?.status || '').trim().toLowerCase());
+          if (isIncomingStale(existingSaleRow, payload) || (isExistingCompletedSale && isIncomingHeldSale)) {
             db.prepare(`
               INSERT OR REPLACE INTO sync_audit_log (client_tx_id, device_id, action, entity, entity_id, invoice_number, status, payload_json)
               VALUES (?, ?, 'UPDATE_SALE', 'sales', ?, ?, 'synced', ?)
@@ -852,21 +855,38 @@ syncRouter.post('/push', (req: Request, res: Response) => {
           });
         } else if (action === 'UPDATE_PURCHASE') {
           const targetId = Number(payload.id || item.local_id);
+          const existingPurRow = targetId > 0
+            ? (db.prepare('SELECT id, bill_number, status, created_at, updated_at FROM purchases WHERE id = ?').get(targetId) as any)
+            : undefined;
+          const incomingPurSt = String(payload.status || '').trim().toLowerCase();
+          const isIncomingHeldPur = ['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(incomingPurSt);
+          const isExistingCompletedPur = ['completed', 'posted'].includes(String(existingPurRow?.status || '').trim().toLowerCase());
+          if (existingPurRow && (isIncomingStale(existingPurRow, payload) || (isExistingCompletedPur && isIncomingHeldPur))) {
+            results.push({
+              client_tx_id,
+              status: 'synced',
+              server_id: targetId,
+              invoice_number: existingPurRow.bill_number || null,
+            });
+            continue;
+          }
           const rawUpdatePurItems = Array.isArray(payload.items)
             ? payload.items
             : Array.isArray(payload.lines)
             ? payload.lines
             : [];
-          const purchaseId = executePurchasePosting({
-            ...payload,
-            items: rawUpdatePurItems.map((line: any) => ({
-              ...line,
-              quantity: Number(line.quantity ?? line.pack_qty ?? line.pack_quantity ?? 0),
-              bonus_quantity: Number(line.bonus_quantity ?? line.bonus_qty ?? line.bonus_units ?? 0),
-              loose_quantity: Number(line.loose_quantity ?? line.loose_qty ?? line.loose_units ?? 0),
-            })),
-            existingPurchaseId: targetId,
-          });
+          const purchaseId = executePurchasePosting(
+            {
+              ...payload,
+              items: rawUpdatePurItems.map((line: any) => ({
+                ...line,
+                quantity: Number(line.quantity ?? line.pack_qty ?? line.pack_quantity ?? 0),
+                bonus_quantity: Number(line.bonus_quantity ?? line.bonus_qty ?? line.bonus_units ?? 0),
+                loose_quantity: Number(line.loose_quantity ?? line.loose_qty ?? line.loose_units ?? 0),
+              })),
+            },
+            targetId > 0 ? targetId : undefined
+          );
           const purRow = db
             .prepare('SELECT bill_number FROM purchases WHERE id = ?')
             .get(purchaseId) as { bill_number: string } | undefined;

@@ -1544,7 +1544,12 @@ export function hydrateSqliteFromCloudRecords(
         let targetSaleId = existing ? Number(existing.id) : 0;
 
         if (!existing) {
-          const normalizedSaleStatus = String(s.status || 'completed').trim().toLowerCase() || 'completed';
+          const rawSaleSt = String(s.status || 'completed').trim().toLowerCase() || 'completed';
+          const normalizedSaleStatus = ['held', 'on_hold', 'on hold', 'hold'].includes(rawSaleSt)
+            ? 'held'
+            : ['confirmed', 'posted'].includes(rawSaleSt)
+            ? 'completed'
+            : rawSaleSt;
           const res = db
             .prepare(
               `INSERT OR IGNORE INTO sales (
@@ -1670,7 +1675,12 @@ export function hydrateSqliteFromCloudRecords(
         let targetPurchaseId = existing ? Number(existing.id) : 0;
 
         if (!existing) {
-          const normalizedPurStatus = String(p.status || 'completed').trim().toLowerCase() || 'completed';
+          const rawPurSt = String(p.status || 'completed').trim().toLowerCase() || 'completed';
+          const normalizedPurStatus = ['held', 'on_hold', 'on hold', 'hold'].includes(rawPurSt)
+            ? 'held'
+            : ['confirmed', 'posted'].includes(rawPurSt)
+            ? 'completed'
+            : rawPurSt;
           const res = db
             .prepare(
               `INSERT OR IGNORE INTO purchases (

@@ -1434,15 +1434,20 @@ purchasesRouter.get('/', (req: Request, res: Response) => {
       conditions.push('p.payment_mode = ?');
       params.push(paymentMode);
     }
-    if (status && status !== 'all') {
-      if (status === 'held_or_draft' || status === 'held') {
-        conditions.push("p.status IN ('draft', 'held')");
+    if (status && String(status).trim().toLowerCase() !== 'all') {
+      const normStatus = String(status).trim().toLowerCase();
+      if (normStatus === 'held_or_draft') {
+        conditions.push("LOWER(TRIM(COALESCE(p.status, ''))) IN ('draft', 'held', 'on_hold', 'on hold', 'hold')");
+      } else if (['held', 'on_hold', 'on hold', 'hold'].includes(normStatus)) {
+        conditions.push("LOWER(TRIM(COALESCE(p.status, ''))) IN ('held', 'on_hold', 'on hold', 'hold')");
+      } else if (normStatus === 'register') {
+        conditions.push("LOWER(TRIM(COALESCE(p.status, ''))) IN ('completed', 'posted', 'cancelled')");
       } else {
-        conditions.push('p.status = ?');
-        params.push(status);
+        conditions.push("LOWER(TRIM(COALESCE(p.status, ''))) = ?");
+        params.push(normStatus);
       }
     } else {
-      conditions.push("p.status IN ('completed', 'cancelled')");
+      conditions.push("LOWER(TRIM(COALESCE(p.status, ''))) IN ('completed', 'posted', 'cancelled')");
     }
     if (startDate && typeof startDate === 'string') {
       conditions.push('DATE(p.bill_date) >= DATE(?)');
@@ -1461,7 +1466,7 @@ purchasesRouter.get('/', (req: Request, res: Response) => {
           p.*,
           COALESCE(p.paid_amount, 0) as paid_amount,
           a.account_code as supplier_code,
-          a.account_name as supplier_name,
+          COALESCE(a.account_name, 'Unspecified Supplier') as supplier_name,
           a.ntn as supplier_ntn,
           a.strn as supplier_strn,
           a.phone as supplier_phone,
@@ -1470,7 +1475,7 @@ purchasesRouter.get('/', (req: Request, res: Response) => {
           (SELECT COUNT(*) FROM purchase_items pi WHERE pi.purchase_id = p.id) as item_count,
           (SELECT COALESCE(SUM(pi.quantity + pi.bonus_quantity), 0) FROM purchase_items pi WHERE pi.purchase_id = p.id) as total_packs
         FROM purchases p
-        INNER JOIN accounts a ON a.id = p.supplier_account_id
+        LEFT JOIN accounts a ON a.id = p.supplier_account_id
         LEFT JOIN accounts payAcc ON payAcc.id = p.payment_account_id
         ${whereClause}
         ORDER BY p.id DESC
@@ -1550,7 +1555,7 @@ purchasesRouter.get('/:id', (req: Request, res: Response) => {
           p.*,
           COALESCE(p.paid_amount, 0) as paid_amount,
           a.account_code as supplier_code,
-          a.account_name as supplier_name,
+          COALESCE(a.account_name, 'Unspecified Supplier') as supplier_name,
           a.ntn as supplier_ntn,
           a.strn as supplier_strn,
           a.phone as supplier_phone,
@@ -1559,7 +1564,7 @@ purchasesRouter.get('/:id', (req: Request, res: Response) => {
           payAcc.account_code as payment_account_code,
           payAcc.account_name as payment_account_name
         FROM purchases p
-        INNER JOIN accounts a ON a.id = p.supplier_account_id
+        LEFT JOIN accounts a ON a.id = p.supplier_account_id
         LEFT JOIN accounts payAcc ON payAcc.id = p.payment_account_id
         WHERE p.id = ?
       `)
@@ -1655,7 +1660,7 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
 
   const rawStatusLower = String(payload.status || 'completed').trim().toLowerCase();
   const targetStatus: 'draft' | 'held' | 'completed' =
-    rawStatusLower === 'held'
+    ['held', 'on_hold', 'on hold', 'hold'].includes(rawStatusLower)
       ? 'held'
       : rawStatusLower === 'draft'
       ? 'draft'
@@ -1693,9 +1698,9 @@ export function executePurchasePosting(payload: Record<string, any>, existingPur
       throw new Error(`Purchase Invoice #${existingPurchaseId} not found.`);
     }
 
+    const existingPurStatusLower = String(existingPurRow.status || '').trim().toLowerCase();
     if (
-      (existingPurRow.status === 'held' ||
-        existingPurRow.status === 'draft' ||
+      (['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(existingPurStatusLower) ||
         existingPurRow.bill_number.startsWith('HLD-')) &&
       targetStatus === 'completed'
     ) {
@@ -2557,7 +2562,8 @@ function reverseExistingPurchase(purchaseId: number, reason: string): void {
   }
 
   // Held and draft purchase invoices never updated stock or accounting ledgers
-  if (existing.status === 'held' || existing.status === 'draft') {
+  const existingStLower = String(existing.status || '').trim().toLowerCase();
+  if (['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(existingStLower)) {
     return;
   }
 
@@ -2685,9 +2691,9 @@ purchasesRouter.post('/', (req: Request, res: Response) => {
       const existingByReq = db
         .prepare(
           `
-          SELECT p.*, a.account_name as supplier_name, a.account_code as supplier_code
+          SELECT p.*, COALESCE(a.account_name, 'Unspecified Supplier') as supplier_name, a.account_code as supplier_code
           FROM purchases p
-          INNER JOIN accounts a ON a.id = p.supplier_account_id
+          LEFT JOIN accounts a ON a.id = p.supplier_account_id
           WHERE p.client_request_id = ?
           LIMIT 1
         `
@@ -2727,9 +2733,9 @@ purchasesRouter.post('/', (req: Request, res: Response) => {
 
     const created = db
       .prepare(`
-        SELECT p.*, a.account_name as supplier_name, a.account_code as supplier_code
+        SELECT p.*, COALESCE(a.account_name, 'Unspecified Supplier') as supplier_name, a.account_code as supplier_code
         FROM purchases p
-        INNER JOIN accounts a ON a.id = p.supplier_account_id
+        LEFT JOIN accounts a ON a.id = p.supplier_account_id
         WHERE p.id = ?
       `)
       .get(newPurchaseId) as Record<string, unknown>;
@@ -2785,14 +2791,27 @@ purchasesRouter.put('/:id', (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: 'Purchase Invoice not found.' });
     }
 
-    if (existing.status === 'cancelled') {
+    const existingStatus = String(existing.status || '').trim().toLowerCase();
+    if (existingStatus === 'cancelled') {
       return res.status(400).json({
         success: false,
         error: 'Cancelled purchase invoices are permanently locked and cannot be edited.',
       });
     }
 
-    if (existing.status === 'completed') {
+    const reqClientId = req.body?.client_request_id ? String(req.body.client_request_id).trim() : '';
+    if (
+      existingStatus === 'completed' &&
+      (req.body?.from_hold_conversion || (reqClientId && existing.client_request_id === reqClientId))
+    ) {
+      return res.status(409).json({
+        success: false,
+        alreadyPosted: true,
+        error: `Held purchase invoice "${existing.bill_number}" has already been posted and cannot be posted twice.`,
+      });
+    }
+
+    if (existingStatus === 'completed') {
       const role = req.user?.role || '';
       if (role !== 'Super Admin' && role !== 'Administrator') {
         return res.status(403).json({
@@ -2820,16 +2839,20 @@ purchasesRouter.put('/:id', (req: Request, res: Response) => {
       reverseExistingPurchase(id, 'Invoice Edit & Re-posting');
       db.prepare('DELETE FROM purchase_items WHERE purchase_id = ?').run(id);
       executePurchasePosting(req.body, id);
-      db.prepare('UPDATE purchases SET updated_by = ? WHERE id = ?').run(username, id);
+      db.prepare('UPDATE purchases SET updated_by = ?, client_request_id = COALESCE(?, client_request_id) WHERE id = ?').run(
+        username,
+        reqClientId || null,
+        id
+      );
     });
 
     editTx();
 
     const updated = db
       .prepare(`
-        SELECT p.*, a.account_name as supplier_name, a.account_code as supplier_code
+        SELECT p.*, COALESCE(a.account_name, 'Unspecified Supplier') as supplier_name, a.account_code as supplier_code
         FROM purchases p
-        INNER JOIN accounts a ON a.id = p.supplier_account_id
+        LEFT JOIN accounts a ON a.id = p.supplier_account_id
         WHERE p.id = ?
       `)
       .get(id) as Record<string, unknown>;
@@ -2881,7 +2904,7 @@ function handleCancelOrDeletePurchase(req: Request, res: Response) {
     assertPeriodOpen(String(existing.bill_date || ''), 'cancel or delete a purchase invoice');
 
     // Held or draft purchases never affected stock or ledgers; allow clean discarding
-    if (existing.status === 'held' || existing.status === 'draft') {
+    if (['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(String(existing.status || '').trim().toLowerCase())) {
       const discardTx = db.transaction(() => {
         db.prepare('DELETE FROM purchase_items WHERE purchase_id = ?').run(id);
         db.prepare('DELETE FROM purchases WHERE id = ?').run(id);

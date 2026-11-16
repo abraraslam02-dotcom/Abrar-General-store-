@@ -2318,6 +2318,8 @@ export const api = {
     status?: string;
     startDate?: string;
     endDate?: string;
+    limit?: number;
+    exportAll?: boolean;
   }) {
     const query = new URLSearchParams();
     if (params?.q) query.append('q', params.q);
@@ -2327,27 +2329,67 @@ export const api = {
     if (params?.status) query.append('status', params.status);
     if (params?.startDate) query.append('startDate', params.startDate);
     if (params?.endDate) query.append('endDate', params.endDate);
+    if (params?.limit) query.append('limit', String(params.limit));
+    if (params?.exportAll) query.append('exportAll', 'true');
 
     try {
       const res = await authFetch(`/api/purchases?${query.toString()}`);
       if (res.ok) {
         const data = await res.json();
         if (data.success) {
-          const srvList = Array.isArray(data.purchases)
+          const srvList: any[] = Array.isArray(data.purchases)
             ? data.purchases
             : Array.isArray(data.data)
             ? data.data
             : [];
           const existingLocal = await offlineStorage.getAll<any>('purchases').catch(() => []);
+          const seenServerIds = new Set<number>(
+            srvList.map((p: any) => Number(p?.id || p?.server_id || 0)).filter((id) => id > 0)
+          );
           const seenBills = new Set<string>(
             srvList
               .map((p: any) => String(p?.bill_number || p?.invoice_number || '').toLowerCase())
               .filter(Boolean)
           );
+
+          const normReqStatus = String(params?.status || '').trim().toLowerCase();
+          const isHeldQuery = ['held_or_draft', 'held', 'on_hold', 'on hold', 'hold'].includes(normReqStatus);
+          const isUnfilteredHeldList =
+            isHeldQuery &&
+            !params?.q &&
+            !params?.supplierId &&
+            !params?.paymentMode &&
+            !params?.startDate &&
+            !params?.endDate;
+
+          // Reconcile stale synced held entries in IndexedDB that are no longer held on active DB
+          if (isUnfilteredHeldList) {
+            for (const loc of existingLocal) {
+              const locSt = String(loc?.status || '').trim().toLowerCase();
+              const isHeldLoc = ['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(locSt);
+              const isPendingLoc =
+                loc?.sync_status === 'pending' || loc?.sync_status === 'syncing' || loc?.sync_status === 'failed';
+              const sid = Number(loc?.server_id || loc?.id || 0);
+              if (isHeldLoc && !isPendingLoc && sid > 0 && !seenServerIds.has(sid) && loc?.client_tx_id) {
+                offlineStorage.delete('purchases', String(loc.client_tx_id)).catch(() => {});
+              }
+            }
+          }
+
           let extraCount = 0;
           for (const loc of existingLocal) {
             if (loc?.sync_status !== 'pending' && loc?.sync_status !== 'syncing' && loc?.sync_status !== 'failed') {
               continue;
+            }
+            const locSt = String(loc?.status || '').trim().toLowerCase();
+            if (normReqStatus && normReqStatus !== 'all') {
+              if (normReqStatus === 'held_or_draft') {
+                if (!['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(locSt)) continue;
+              } else if (['held', 'on_hold', 'on hold', 'hold'].includes(normReqStatus)) {
+                if (!['held', 'on_hold', 'on hold', 'hold'].includes(locSt)) continue;
+              } else if (locSt !== normReqStatus) {
+                continue;
+              }
             }
             const bNo = String(loc?.bill_number || loc?.invoice_number || '').toLowerCase();
             if (bNo && seenBills.has(bNo)) continue;
@@ -2357,25 +2399,48 @@ export const api = {
           if (srvList.length > 0) {
             const toStore = srvList.map((p: any) => ({
               ...p,
+              server_id: p.server_id || p.id,
               client_tx_id: p.client_tx_id || `PUR-${p.id || p.bill_number || p.invoice_number || Date.now()}`,
+              sync_status: p.sync_status || 'synced',
             }));
             offlineStorage.bulkPut('purchases', toStore).catch(() => {});
           }
-          if (extraCount > 0) {
-            data.purchases = srvList;
-            data.data = srvList;
-          }
+          data.purchases = srvList;
+          data.data = srvList;
           return data;
         }
       }
-    } catch {
+      if (res.status >= 400) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody?.error || `Failed to load purchase invoices (HTTP ${res.status})`);
+      }
+    } catch (err: any) {
+      if (
+        err?.message &&
+        !err.message.includes('Failed to fetch') &&
+        !err.message.includes('NetworkError') &&
+        (typeof navigator === 'undefined' || navigator.onLine !== false)
+      ) {
+        throw err;
+      }
       // Offline fallback from IndexedDB
     }
     let localPurchases = await offlineStorage.getAll<any>('purchases');
     if (params?.status && params.status !== 'all') {
-      localPurchases = localPurchases.filter(
-        (p) => String(p.status || '').toLowerCase() === params.status!.toLowerCase()
-      );
+      const stFilter = params.status.trim().toLowerCase();
+      localPurchases = localPurchases.filter((p) => {
+        const st = String(p.status || '').trim().toLowerCase();
+        if (stFilter === 'held_or_draft') {
+          return ['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(st);
+        }
+        if (['held', 'on_hold', 'on hold', 'hold'].includes(stFilter)) {
+          return ['held', 'on_hold', 'on hold', 'hold'].includes(st);
+        }
+        if (stFilter === 'register') {
+          return ['completed', 'posted', 'cancelled'].includes(st);
+        }
+        return st === stFilter;
+      });
     }
     if (params?.supplierId && params.supplierId !== 'all') {
       localPurchases = localPurchases.filter(
@@ -2479,6 +2544,7 @@ export const api = {
       return {
         success: true,
         offline: true,
+        data: normalizedPurchase,
         purchase: normalizedPurchase,
         items: found.items || [],
         journalLines: [],
@@ -2561,14 +2627,25 @@ export const api = {
       const data = await res.json();
       if (res.ok && data.success) {
         const savedPur = data.purchase || data.data || {};
+        const canonicalId = savedPur.id || id;
+        const canonicalTxId = savedPur.client_tx_id || payload.client_tx_id || `PUR-${canonicalId}`;
         const purRecord = {
           ...payload,
           ...savedPur,
-          id: savedPur.id || id,
-          client_tx_id: savedPur.client_tx_id || payload.client_tx_id || `PUR-${id}`,
-          items: Array.isArray(payload.items) ? payload.items : savedPur.items || [],
+          id: canonicalId,
+          server_id: canonicalId,
+          client_tx_id: canonicalTxId,
+          items: Array.isArray(data.items) ? data.items : Array.isArray(payload.items) ? payload.items : savedPur.items || [],
           sync_status: 'synced',
         };
+        const existingLocalPur = await offlineStorage.getAll<any>('purchases').catch(() => []);
+        for (const loc of existingLocalPur) {
+          const matchesSamePur =
+            String(loc.id) === String(canonicalId) || String(loc.server_id) === String(canonicalId);
+          if (matchesSamePur && loc.client_tx_id && String(loc.client_tx_id) !== String(canonicalTxId)) {
+            await offlineStorage.delete('purchases', String(loc.client_tx_id)).catch(() => {});
+          }
+        }
         offlineStorage.put('purchases', purRecord).catch(() => {});
         return data;
       }
@@ -2987,6 +3064,9 @@ export const api = {
           const toCache: any[] = [];
           const seenKeys = new Set<string>();
           const seenInvNos = new Set<string>();
+          const seenServerIds = new Set<number>(
+            rows.map((s: any) => Number(s?.id || s?.server_id || 0)).filter((sid) => sid > 0)
+          );
           const enriched = rows.map((srvSale: any) => {
             const txKey = String(srvSale.client_tx_id || `SRV-SALE-${srvSale.id}`);
             seenKeys.add(txKey);
@@ -3001,6 +3081,7 @@ export const api = {
             }
             const merged = {
               ...srvSale,
+              server_id: srvSale.server_id || srvSale.id,
               client_tx_id: loc?.client_tx_id || txKey,
               sync_status: 'synced' as const,
               sync_error: null,
@@ -3009,29 +3090,55 @@ export const api = {
             return merged;
           });
 
+          const normReqStatus = String(params?.status || '').trim().toLowerCase();
+          const isHeldQuery = ['held_or_draft', 'held', 'on_hold', 'on hold', 'hold'].includes(normReqStatus);
+          const isUnfilteredHeldList =
+            isHeldQuery &&
+            !params?.q &&
+            !params?.customerId &&
+            !params?.paymentMode &&
+            !params?.invoiceType &&
+            !params?.salesman &&
+            !params?.startDate &&
+            !params?.endDate;
+
+          // Reconcile stale synced held records in IndexedDB that are no longer held on active DB
+          if (isUnfilteredHeldList) {
+            for (const loc of existingLocal) {
+              const locSt = String(loc?.status || '').trim().toLowerCase();
+              const isHeldLoc = ['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(locSt);
+              const isPendingLoc =
+                loc?.sync_status === 'pending' || loc?.sync_status === 'syncing' || loc?.sync_status === 'failed';
+              const sid = Number(loc?.server_id || loc?.id || 0);
+              if (isHeldLoc && !isPendingLoc && sid > 0 && !seenServerIds.has(sid) && loc?.client_tx_id) {
+                offlineStorage.delete('sales', String(loc.client_tx_id)).catch(() => {});
+              }
+            }
+          }
+
           // Include ONLY genuinely unsynced offline invoices (pending/syncing/failed) not yet pushed to server
           let mergedExtraCount = 0;
           const qLower = String(params?.q || '').trim().toLowerCase();
           for (const loc of existingLocal) {
-            const locSt = String(loc.status || '').toLowerCase();
-            const isHeldOrDraftLoc = locSt === 'held' || locSt === 'draft' || locSt === 'on_hold';
+            const locSt = String(loc.status || '').trim().toLowerCase();
             const isPendingLoc = loc?.sync_status === 'pending' || loc?.sync_status === 'syncing' || loc?.sync_status === 'failed';
-
-            if (params?.status === 'held_or_draft') {
-              if (!isHeldOrDraftLoc) continue;
-            } else if (!isPendingLoc) {
+            if (!isPendingLoc) {
               continue;
             }
             const key = String(loc?.client_tx_id || '');
             const invNoLower = String(loc?.invoice_number || '').toLowerCase();
-            if ((key && seenKeys.has(key)) || (invNoLower && seenInvNos.has(invNoLower))) {
+            const locSid = Number(loc?.server_id || loc?.id || 0);
+            if ((key && seenKeys.has(key)) || (invNoLower && seenInvNos.has(invNoLower)) || (locSid > 0 && seenServerIds.has(locSid))) {
               continue;
             }
-            if (params?.status && params.status !== 'all') {
-              const locSt = String(loc.status || '').toLowerCase();
-              if (params.status === 'held_or_draft') {
-                if (locSt !== 'held' && locSt !== 'draft') continue;
-              } else if (locSt !== params.status.toLowerCase()) {
+            if (params?.status && normReqStatus !== 'all') {
+              if (normReqStatus === 'held_or_draft') {
+                if (!['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(locSt)) continue;
+              } else if (['held', 'on_hold', 'on hold', 'hold'].includes(normReqStatus)) {
+                if (!['held', 'on_hold', 'on hold', 'hold'].includes(locSt)) continue;
+              } else if (normReqStatus === 'register') {
+                if (!['completed', 'posted', 'cancelled'].includes(locSt)) continue;
+              } else if (locSt !== normReqStatus) {
                 continue;
               }
             }
@@ -3099,17 +3206,36 @@ export const api = {
           };
         }
       }
-    } catch {
+      if (res.status >= 400) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody?.error || `Failed to load sales invoices (HTTP ${res.status})`);
+      }
+    } catch (err: any) {
+      if (
+        err?.message &&
+        !err.message.includes('Failed to fetch') &&
+        !err.message.includes('NetworkError') &&
+        (typeof navigator === 'undefined' || navigator.onLine !== false)
+      ) {
+        throw err;
+      }
       // Offline fallback from latest synchronized IndexedDB
     }
     let localSales = await offlineStorage.getAll<any>('sales');
     if (params?.status && params.status !== 'all') {
+      const stFilter = params.status.trim().toLowerCase();
       localSales = localSales.filter((s) => {
-        const st = String(s.status || '').toLowerCase();
-        if (params.status === 'held_or_draft') {
-          return st === 'held' || st === 'draft' || st === 'on_hold';
+        const st = String(s.status || '').trim().toLowerCase();
+        if (stFilter === 'held_or_draft') {
+          return ['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(st);
         }
-        return st === params.status!.toLowerCase();
+        if (['held', 'on_hold', 'on hold', 'hold'].includes(stFilter)) {
+          return ['held', 'on_hold', 'on hold', 'hold'].includes(st);
+        }
+        if (stFilter === 'register') {
+          return ['completed', 'posted', 'cancelled'].includes(st);
+        }
+        return st === stFilter;
       });
     }
     if (params?.customerId && params.customerId !== 'all') {
@@ -3318,15 +3444,16 @@ export const api = {
       const data = await res.json();
       if (res.ok && data.success) {
         const savedInvoice = data.invoice || data.data || data.sale;
+        const canonicalId = savedInvoice?.id || existing?.id || id;
         const txKey = String(
-          savedInvoice?.client_tx_id || existing?.client_tx_id || `SRV-SALE-${id}`
+          savedInvoice?.client_tx_id || existing?.client_tx_id || `SRV-SALE-${canonicalId}`
         );
         const saleRecord = {
           ...(existing || {}),
           ...payload,
           ...(savedInvoice || {}),
-          id: savedInvoice?.id || existing?.id || id,
-          server_id: savedInvoice?.id || existing?.server_id,
+          id: canonicalId,
+          server_id: canonicalId,
           client_tx_id: txKey,
           items: savedInvoice?.items || payload.items || existing?.items || [],
           sync_status: 'synced' as const,
@@ -3335,14 +3462,24 @@ export const api = {
           created_at: existing?.created_at || savedInvoice?.created_at || nowIso,
           updated_at: savedInvoice?.updated_at || nowIso,
         };
+        for (const loc of allSales) {
+          const matchesSameSale =
+            String(loc.id) === String(canonicalId) || String(loc.server_id) === String(canonicalId);
+          if (matchesSameSale && loc.client_tx_id && String(loc.client_tx_id) !== txKey) {
+            await offlineStorage.delete('sales', String(loc.client_tx_id)).catch(() => {});
+          }
+        }
         await offlineStorage.put('sales', saleRecord);
         if (data.invoice) data.invoice = saleRecord;
         if (data.data) data.data = saleRecord;
         await offlineSyncManager.refreshPendingCount();
         return data;
       }
-      if (res.status >= 400 && res.status < 500 && data.error) {
+      if (res.status >= 400 && data?.error) {
         throw new Error(data.error);
+      }
+      if (!res.ok) {
+        throw new Error(`Failed to update sales invoice (HTTP ${res.status})`);
       }
     } catch (err: any) {
       if (

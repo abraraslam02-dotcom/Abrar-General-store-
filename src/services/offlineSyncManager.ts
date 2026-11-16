@@ -435,14 +435,16 @@ class OfflineSyncManager {
     }
 
     const localByTxId = new Map<string, any>();
-    const localByServerId = new Map<number, any>();
+    const localRowsByServerId = new Map<number, any[]>();
     for (const loc of localRows) {
       if (loc?.client_tx_id) {
         localByTxId.set(String(loc.client_tx_id), loc);
       }
       const srvId = Number(loc?.server_id || loc?.id || 0);
       if (srvId > 0 && srvId < 1_000_000_000_000) {
-        localByServerId.set(srvId, loc);
+        const list = localRowsByServerId.get(srvId) || [];
+        list.push(loc);
+        localRowsByServerId.set(srvId, list);
       }
     }
 
@@ -461,12 +463,19 @@ class OfflineSyncManager {
       const remoteTs = this.normalizeTimestamp(remote.updated_at || remote.created_at);
       if (remoteTs > latestUpdatedAt) latestUpdatedAt = remoteTs;
 
-      const existingByServerId = srvId > 0 ? localByServerId.get(srvId) : undefined;
-      if (existingByServerId && String(existingByServerId.client_tx_id) !== remoteTxId) {
-        if (pendingTxIds.has(String(existingByServerId.client_tx_id))) {
+      const existingRowsForServerId = srvId > 0 ? localRowsByServerId.get(srvId) || [] : [];
+      let hasPendingCollision = false;
+      for (const existingRow of existingRowsForServerId) {
+        const existingTx = String(existingRow?.client_tx_id || '');
+        if (!existingTx || existingTx === remoteTxId) continue;
+        if (pendingTxIds.has(existingTx)) {
+          hasPendingCollision = true;
           continue;
         }
-        await offlineStorage.delete(storeName, String(existingByServerId.client_tx_id)).catch(() => {});
+        await offlineStorage.delete(storeName, existingTx).catch(() => {});
+      }
+      if (hasPendingCollision) {
+        continue;
       }
 
       const existingByTx = localByTxId.get(remoteTxId);

@@ -481,10 +481,22 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const [storeDisplayName, setStoreDisplayName] = useState<string>('ABRAR MEDICAL STORE');
   const customerEnterFocusTimestampRef = useRef<number>(0);
 
-  // Fetch held/draft invoices independently so a failure here cannot block the whole datasheet.
+  const editingSaleIdRef = useRef<number | null>(null);
+  const isResumingRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    editingSaleIdRef.current = editingSaleId;
+  }, [editingSaleId]);
+
+  const isHeldStatus = (statusVal: unknown): boolean => {
+    const norm = String(statusVal || '').trim().toLowerCase();
+    return ['held', 'draft', 'on_hold', 'on hold', 'hold'].includes(norm);
+  };
+
+  // Fetch held/draft invoices directly from active database so a failure here cannot block the datasheet.
   const refreshHeldInvoices = useCallback(async () => {
     try {
-      const res: any = await api.getSales({ status: 'held_or_draft', pageSize: 100 });
+      const res: any = await api.getSales({ status: 'held_or_draft', exportAll: true });
       const candidates = [
         res?.data,
         res?.sales,
@@ -495,9 +507,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         res?.data?.invoices,
       ];
       const list = candidates.find(Array.isArray) || [];
-      setHeldInvoices(list.filter((inv: any) =>
-        ['held', 'draft', 'on_hold'].includes(String(inv?.status || '').toLowerCase())
-      ));
+      setHeldInvoices(list.filter((inv: any) => isHeldStatus(inv?.status)));
     } catch (err) {
       console.error('Unable to load held/draft sales invoices:', err);
       setHeldInvoices([]);
@@ -505,8 +515,16 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   }, []);
 
   const openHeldDrawer = useCallback(async () => {
-    await refreshHeldInvoices();
     setShowHeldDrawer(true);
+    await refreshHeldInvoices();
+  }, [refreshHeldInvoices]);
+
+  useEffect(() => {
+    const onSyncDone = () => {
+      refreshHeldInvoices();
+    };
+    window.addEventListener('ams-sync-completed', onSyncDone);
+    return () => window.removeEventListener('ams-sync-completed', onSyncDone);
   }, [refreshHeldInvoices]);
 
   // Load initial reference data + restore draft from localStorage
@@ -514,11 +532,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     try {
       const [accountsRes, taxRes, nextNumRes, fastItemsRes, heldRes, smRes, dmRes, settingsRes] =
         await Promise.all([
-          api.getAccounts({ status: 'Active' }),
-          api.getAdvanceTaxSettings(),
-          api.getNextSalesNumbers(invoiceDate),
-          api.fastSearchSalesItems('', 20000),
-          api.getSales({ status: 'held_or_draft', pageSize: 100 }).catch((err) => {
+          api.getAccounts({ status: 'Active' }).catch(() => ({ accounts: [], data: [] })),
+          api.getAdvanceTaxSettings().catch(() => ({ settings: null })),
+          api.getNextSalesNumbers(invoiceDate).catch(() => ({ nextInvoiceNumber: '' })),
+          api.fastSearchSalesItems('', 20000).catch(() => ({ data: [], items: [] })),
+          api.getSales({ status: 'held_or_draft', exportAll: true }).catch((err) => {
             console.error('Held invoice list request failed:', err);
             return { data: [] };
           }),
@@ -549,10 +567,16 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       setCustomers(partyCusts);
       setFinancialAccounts(finAccs);
       setTaxSettings(taxRes.settings || null);
-      setCatalogItems(fastItemsRes.data || []);
+      const loadedCatalog = Array.isArray(fastItemsRes?.data)
+        ? fastItemsRes.data
+        : Array.isArray(fastItemsRes?.items)
+        ? fastItemsRes.items
+        : [];
+      setCatalogItems(loadedCatalog);
+
       const heldCandidates = [heldRes?.data, heldRes?.sales, heldRes?.invoices, heldRes?.records, heldRes?.data?.data, heldRes?.data?.sales, heldRes?.data?.invoices];
       const heldList = heldCandidates.find(Array.isArray) || [];
-      setHeldInvoices(heldList.filter((inv: any) => ['held', 'draft', 'on_hold'].includes(String(inv?.status || '').toLowerCase())));
+      setHeldInvoices(heldList.filter((inv: any) => isHeldStatus(inv?.status)));
 
       const activeSalesmen: SalesmanRecord[] = (smRes.data || []).map((sm: SalesmanRecord) => ({
         ...sm,
@@ -562,13 +586,17 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       setSalesmenList(activeSalesmen);
       setDeliverymenList(activeDeliverymen);
 
-      const defaultWalkIn =
-        partyCusts.find((c: any) => c.account_code === 'CUS-1001') || partyCusts[0];
       const defaultCash = finAccs.find((f: any) => f.account_code === 'FIN-1010') || finAccs[0];
+
+      // Never overwrite an invoice currently being resumed or edited
+      if (isResumingRef.current || editingSaleIdRef.current || resumeInvoiceId) {
+        draftRestoredRef.current = true;
+        return;
+      }
 
       // Restore draft from localStorage if present with at least one active item and not resuming a specific DB invoice
       const savedDraftRaw = localStorage.getItem(ACTIVE_DRAFT_STORAGE_KEY);
-      if (savedDraftRaw && !resumeInvoiceId) {
+      if (savedDraftRaw) {
         try {
           const parsed = JSON.parse(savedDraftRaw);
           if (
@@ -622,7 +650,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         }
       }
 
-      setInvoiceNumber(nextNumRes.nextInvoiceNumber);
+      if (nextNumRes.nextInvoiceNumber) {
+        setInvoiceNumber(nextNumRes.nextInvoiceNumber);
+      }
       // Requirement 7: New Sales Invoice must start with an empty Customer field (never auto-select previous/default customer)
       if (activeSalesmen.length > 0 && !salesmanId) {
         setSalesmanId(activeSalesmen[0].id);
@@ -943,14 +973,18 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   const handleResumeInvoice = useCallback(
     async (idToResume: number) => {
       try {
+        isResumingRef.current = true;
         setErrorMsg(null);
         const res: any = await api.getSaleDetails(idToResume);
         const inv = res?.data || res?.invoice || res?.sale || res || {};
         const invId = Number(inv.id || idToResume);
+        editingSaleIdRef.current = invId;
+        localStorage.removeItem(ACTIVE_DRAFT_STORAGE_KEY);
         setEditingSaleId(invId);
         setInvoiceNumber(String(inv.invoice_number || ''));
         setInvoiceDate(String(inv.invoice_date || new Date().toISOString().slice(0, 10)));
         setCustomerAccountId(Number(inv.customer_account_id || 0));
+        setCustomerSearchText('');
         setBuyerName(String(inv.buyer_name || ''));
         setSalesmanId(inv.salesman_id ? Number(inv.salesman_id) : null);
         setSalesman(String(inv.salesman || 'Counter Pharmacist'));
@@ -1033,6 +1067,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         if (onClearResume) onClearResume();
       } catch (err: unknown) {
         setErrorMsg(err instanceof Error ? err.message : String(err));
+      } finally {
+        isResumingRef.current = false;
       }
     },
     [catalogItems, onClearResume]
@@ -1043,6 +1079,33 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       handleResumeInvoice(resumeInvoiceId);
     }
   }, [resumeInvoiceId, handleResumeInvoice]);
+
+  // Enrich resumed rows with catalog metadata once catalogItems finishes loading (without altering saved rates/qty)
+  useEffect(() => {
+    if (!editingSaleId || catalogItems.length === 0) return;
+    setRows((prev) => {
+      let changed = false;
+      const next = prev.map((r) => {
+        if (!r.item_id || (r.batches && r.batches.length > 0)) return r;
+        const catMatch = catalogItems.find((c) => Number(c.id) === Number(r.item_id));
+        if (!catMatch) return r;
+        changed = true;
+        return {
+          ...r,
+          barcode: r.barcode || catMatch.barcode || '',
+          strips_per_box: catMatch.strips_per_box || r.strips_per_box,
+          units_per_strip: catMatch.units_per_strip || r.units_per_strip,
+          available_stock_packs: r.available_stock_packs || Number(catMatch.total_available_packs || 0),
+          available_stock_units: r.available_stock_units || Number(catMatch.total_available_units || 0),
+          retail_price_ref: Number(catMatch.retail_price || r.retail_price_ref || r.unit_price || 0),
+          wholesale_price_ref: Number(catMatch.wholesale_price || r.wholesale_price_ref || r.unit_price || 0),
+          lastPurchaseCostRate: catMatch.purchase_price ? round2(catMatch.purchase_price) : r.lastPurchaseCostRate,
+          batches: catMatch.batches || [],
+        };
+      });
+      return changed ? next : prev;
+    });
+  }, [catalogItems, editingSaleId]);
 
   // Search existing sales invoices to edit
   const handleSearchInvoicesToEdit = useCallback(async (queryStr: string) => {
@@ -1832,6 +1895,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     targetStatus: 'completed' | 'held' | 'draft',
     autoPrintFormat?: 'a4' | '80mm' | '58mm'
   ) => {
+    if (submitting) return;
     try {
       setErrorMsg(null);
       setSuccessMsg(null);
@@ -1908,6 +1972,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         paid_amount: paidAmount,
         allow_negative_stock: allowNegativeStock ? 1 : 0,
         status: targetStatus,
+        ...(editingSaleId && targetStatus === 'completed' ? { from_hold_conversion: true } : {}),
         remarks,
         items: activeLines.map((r) => ({
           item_id: r.item_id,
@@ -1929,11 +1994,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         })),
       };
 
-      const res = editingSaleId
-        ? await api.updateSale(editingSaleId, payload)
+      const prevEditingId = editingSaleId;
+      const res: any = prevEditingId
+        ? await api.updateSale(prevEditingId, payload)
         : await api.createSale(payload);
 
-      const savedInvoice = res.data as SalesInvoiceRecord;
+      const savedInvoice = (res?.data || res?.invoice || res?.sale || res) as SalesInvoiceRecord;
+      if (prevEditingId && targetStatus === 'completed') {
+        setHeldInvoices((prev) => prev.filter((h) => Number(h.id) !== Number(prevEditingId)));
+      }
 
       const waPayload: WhatsAppDocumentPayload = {
         storeName: storeDisplayName,
@@ -6163,21 +6232,32 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                     </tr>
                   ) : (
                     heldInvoices.map((h) => (
-                      <tr key={h.id} className="border-b border-slate-100">
-                        <td className="px-3 py-2 font-mono font-bold">{h.invoice_number}</td>
-                        <td className="px-3 py-2 font-mono">{h.invoice_date}</td>
-                        <td className="px-3 py-2 font-semibold">{h.customer_name}</td>
+                      <tr
+                        key={h.id}
+                        onClick={() => handleResumeInvoice(h.id)}
+                        onDoubleClick={() => handleResumeInvoice(h.id)}
+                        title="Click or double-click to open this held invoice in datasheet"
+                        className="border-b border-slate-100 cursor-pointer hover:bg-emerald-50/70 transition-colors"
+                      >
+                        <td className="px-3 py-2 font-mono font-bold text-slate-900">{h.invoice_number}</td>
+                        <td className="px-3 py-2 font-mono text-slate-700">{h.invoice_date}</td>
+                        <td className="px-3 py-2 font-semibold text-slate-900">
+                          {h.customer_name || 'Walk-in Cash Customer'}
+                        </td>
                         <td className="px-3 py-2 uppercase font-bold text-amber-700">
                           {h.status}
                         </td>
-                        <td className="px-3 py-2 text-right font-mono font-bold">
+                        <td className="px-3 py-2 text-right font-mono font-bold text-slate-900">
                           {formatPKR(h.net_total)}
                         </td>
                         <td className="px-3 py-2 text-right">
                           <button
                             type="button"
-                            onClick={() => handleResumeInvoice(h.id)}
-                            className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-bold cursor-pointer"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleResumeInvoice(h.id);
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer"
                           >
                             Resume
                           </button>
