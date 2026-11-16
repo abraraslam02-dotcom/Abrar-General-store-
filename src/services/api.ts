@@ -3208,6 +3208,7 @@ export const api = {
       return {
         success: true,
         offline: true,
+        data: normalizedSale,
         invoice: normalizedSale,
         sale: normalizedSale,
         items: found.items || found.lines || [],

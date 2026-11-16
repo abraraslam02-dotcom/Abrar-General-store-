@@ -944,62 +944,71 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     async (idToResume: number) => {
       try {
         setErrorMsg(null);
-        const res = await api.getSaleDetails(idToResume);
-        const inv = res.data as SalesInvoiceRecord;
-        setEditingSaleId(inv.id);
-        setInvoiceNumber(inv.invoice_number);
-        setInvoiceDate(inv.invoice_date);
-        setCustomerAccountId(Number(inv.customer_account_id));
+        const res: any = await api.getSaleDetails(idToResume);
+        const inv = res?.data || res?.invoice || res?.sale || res || {};
+        const invId = Number(inv.id || idToResume);
+        setEditingSaleId(invId);
+        setInvoiceNumber(String(inv.invoice_number || ''));
+        setInvoiceDate(String(inv.invoice_date || new Date().toISOString().slice(0, 10)));
+        setCustomerAccountId(Number(inv.customer_account_id || 0));
         setBuyerName(String(inv.buyer_name || ''));
         setSalesmanId(inv.salesman_id ? Number(inv.salesman_id) : null);
-        setSalesman(inv.salesman || 'Counter Pharmacist');
+        setSalesman(String(inv.salesman || 'Counter Pharmacist'));
         setDeliverymanId(inv.deliveryman_id ? Number(inv.deliveryman_id) : null);
-        setDeliverymanName(inv.deliveryman_name || '');
+        setDeliverymanName(String(inv.deliveryman_name || ''));
         setDeliveryStatus((inv.delivery_status as any) || 'Pending');
         setDeliveryCharges(Number(inv.delivery_charges || 0));
-        setDeliveryNotes(inv.delivery_notes || '');
+        setDeliveryNotes(String(inv.delivery_notes || ''));
         setInvoiceType(inv.invoice_type || 'Retail');
         setPaymentMode(inv.payment_mode || 'Cash');
-        setPaymentAccountId(inv.payment_account_id || null);
+        setPaymentAccountId(inv.payment_account_id ? Number(inv.payment_account_id) : null);
         setInvoiceDiscountPercent(Number(inv.invoice_discount_percent || 0));
         setInvoiceDiscountAmount(Number(inv.invoice_discount_amount || 0));
         setAdvanceTaxApplicable(Boolean(inv.advance_tax_applicable));
         setAdvanceTaxRate(Number(inv.advance_tax_rate || 0));
         setIsTaxOverridden(Boolean(inv.is_tax_overridden));
-        setTaxOverrideReason(inv.tax_override_reason || '');
+        setTaxOverrideReason(String(inv.tax_override_reason || ''));
         const rawPaidAmt = Number(inv.paid_amount ?? 0);
         const safePaidAmt = Number.isFinite(rawPaidAmt) ? Math.max(0, rawPaidAmt) : 0;
         setPaidAmountManuallyEdited(true);
         setPaidAmountInput(String(safePaidAmt));
         setAllowNegativeStock(Boolean(inv.allow_negative_stock));
-        setRemarks(inv.remarks || '');
+        setRemarks(String(inv.remarks || ''));
 
-        if (Array.isArray(inv.items) && inv.items.length > 0) {
-          const loadedRows: DatasheetRow[] = inv.items.map((line: any) => {
-            const catMatch = catalogItems.find((c) => c.id === Number(line.item_id));
+        const rawItems = Array.isArray(inv.items) && inv.items.length > 0
+          ? inv.items
+          : Array.isArray(res?.items) && res.items.length > 0
+          ? res.items
+          : Array.isArray(res?.lines)
+          ? res.lines
+          : [];
+
+        if (rawItems.length > 0) {
+          const loadedRows: DatasheetRow[] = rawItems.map((line: any) => {
+            const catMatch = catalogItems.find((c) => Number(c.id) === Number(line.item_id || line.itemId));
             return recalcRow({
-              row_id: `row_${line.id}_${Math.random().toString(36).slice(2, 6)}`,
-              item_id: Number(line.item_id),
+              row_id: `row_${line.id || Math.random().toString(36).slice(2, 6)}`,
+              item_id: Number(line.item_id || line.itemId || 0),
               inventory_id: line.inventory_id ? Number(line.inventory_id) : null,
-              item_code: String(line.item_code),
+              item_code: String(line.item_code || catMatch?.item_code || ''),
               barcode: String(line.barcode || catMatch?.barcode || ''),
               company_name: String(line.company_name || catMatch?.company_name || ''),
-              item_name: String(line.item_name),
-              packing: String(line.packing || '1x1'),
+              item_name: String(line.item_name || catMatch?.item_name || 'Medicine Item'),
+              packing: String(line.packing || catMatch?.packing || '1x1'),
               strips_per_box: catMatch?.strips_per_box || 1,
               units_per_strip: catMatch?.units_per_strip || Number(line.units_per_pack || 1),
-              units_per_pack: Number(line.units_per_pack || 1),
-              batch_number: String(line.batch_number),
-              expiry_date: String(line.expiry_date),
+              units_per_pack: Number(line.units_per_pack || catMatch?.units_per_pack || 1),
+              batch_number: String(line.batch_number || catMatch?.default_batch?.batch_number || 'B-01'),
+              expiry_date: String(line.expiry_date || catMatch?.default_batch?.expiry_date || '2028-12-31'),
               available_stock_packs: Number(line.available_stock_packs || catMatch?.total_available_packs || 0),
               available_stock_units: Number(line.available_stock_units || catMatch?.total_available_units || 0),
               quantity: Number(line.quantity || 0),
               bonus_quantity: Number(line.bonus_quantity || 0),
-              unit_price: Number(line.unit_price || 0),
+              unit_price: Number(line.unit_price || line.trade_price || catMatch?.retail_price || 0),
               discount_percent: Number(line.discount_percent || 0),
               discount_amount: Number(line.discount_amount || 0),
               loose_quantity: Number(line.loose_quantity || 0),
-              loose_rate: Number(line.loose_rate || 0),
+              loose_rate: Number(line.loose_rate || line.loose_price || 0),
               total_units: Number(line.total_units || 0),
               gross_amount: Number(line.gross_amount || 0),
               taxable_amount: Number(line.taxable_amount || 0),
@@ -1016,9 +1025,11 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             });
           });
           setRows(ensureMinimumRows(loadedRows));
+        } else {
+          setRows(ensureMinimumRows([]));
         }
         setShowHeldDrawer(false);
-        setSuccessMsg(`Loaded Invoice ${inv.invoice_number} (${inv.status.toUpperCase()}) into datasheet.`);
+        setSuccessMsg(`Loaded Invoice ${inv.invoice_number || invId} into datasheet.`);
         if (onClearResume) onClearResume();
       } catch (err: unknown) {
         setErrorMsg(err instanceof Error ? err.message : String(err));
