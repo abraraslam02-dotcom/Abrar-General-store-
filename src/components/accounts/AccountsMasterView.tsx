@@ -913,9 +913,11 @@ export const AccountsMasterView: React.FC<AccountsMasterViewProps> = ({
 
                       {/* Opening Balance */}
                       <td className="py-2.5 px-3 text-right font-mono font-semibold text-slate-800 whitespace-nowrap">
-                        {acc.opening_balance > 0
-                          ? `Rs. ${acc.opening_balance.toFixed(2)}`
-                          : '0.00'}
+                        {acc.opening_balance !== null && acc.opening_balance !== undefined
+                          ? acc.opening_balance > 0
+                            ? `Rs. ${Number(acc.opening_balance).toFixed(2)}`
+                            : '0.00'
+                          : <span className="text-slate-400">—</span>}
                       </td>
 
                       {/* Opening Balance Type (Dr / Cr) */}

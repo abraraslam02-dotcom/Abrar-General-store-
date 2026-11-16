@@ -152,12 +152,23 @@ class OfflineSyncManager {
         ]);
 
       const customAccounts = localAccounts.filter((a) => Number(a?.is_system_account || 0) === 0);
+      const validSalesForRehydrate = localSales.filter(
+        (s) =>
+          (Array.isArray(s?.items) && s.items.length > 0) ||
+          (Array.isArray(s?.lines) && s.lines.length > 0)
+      );
+      const validPurchasesForRehydrate = localPurchases.filter(
+        (p) =>
+          (Array.isArray(p?.items) && p.items.length > 0) ||
+          (Array.isArray(p?.lines) && p.lines.length > 0)
+      );
+
       const totalLocal =
         localItems.length +
         customAccounts.length +
         localInventory.length +
-        localSales.length +
-        localPurchases.length +
+        validSalesForRehydrate.length +
+        validPurchasesForRehydrate.length +
         localCashBook.length;
 
       if (totalLocal === 0) return 0;
@@ -169,8 +180,8 @@ class OfflineSyncManager {
           items: localItems,
           accounts: customAccounts,
           inventory: localInventory,
-          sales: localSales,
-          purchases: localPurchases,
+          sales: validSalesForRehydrate,
+          purchases: validPurchasesForRehydrate,
           cashBookVouchers: localCashBook,
         }),
       });
@@ -488,8 +499,26 @@ class OfflineSyncManager {
         continue;
       }
 
+      const remoteItems = Array.isArray(remote?.items)
+        ? remote.items
+        : Array.isArray(remote?.lines)
+        ? remote.lines
+        : null;
+      const existingItems = Array.isArray(existingByTx?.items)
+        ? existingByTx.items
+        : Array.isArray(existingByTx?.lines)
+        ? existingByTx.lines
+        : [];
+      const preserveExistingItems =
+        (storeName === 'sales' || storeName === 'purchases') &&
+        (!remoteItems || (remoteItems.length === 0 && Number(remote?.item_count || 0) > 0)) &&
+        existingItems.length > 0;
+
       toUpsert.push({
         ...remote,
+        ...(preserveExistingItems
+          ? { items: existingItems, lines: existingByTx?.lines || existingItems }
+          : {}),
         sync_status: 'synced',
         local_modified: false,
       });

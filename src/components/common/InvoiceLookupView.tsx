@@ -265,9 +265,13 @@ export const InvoiceLookupView: React.FC<InvoiceLookupViewProps> = ({
       setOpeningId(row.uid);
       setError(null);
       if (row.invoice_type === 'Sales') {
-        const res = await api.getSaleDetails(row.invoice_id);
-        if (res?.data) {
-          setPrintSalesInvoice(res.data);
+        const res: any = await api.getSaleDetails(row.invoice_id);
+        const inv = res?.data || res?.invoice || res?.sale;
+        if (inv) {
+          setPrintSalesInvoice({
+            ...inv,
+            items: (Array.isArray(inv.items) && inv.items.length > 0 ? inv.items : res?.items) || [],
+          });
         } else {
           setError('Sales invoice details could not be loaded.');
         }

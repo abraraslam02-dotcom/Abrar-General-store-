@@ -95,13 +95,29 @@ export const SalesRegisterView: React.FC<SalesRegisterViewProps> = ({
 
   const handleOpenView = async (id: number) => {
     const res: any = await api.getSaleDetails(id);
-    setViewInvoice(res?.data || res?.invoice || res?.sale || res);
+    const inv = res?.data || res?.invoice || res?.sale || res;
+    setViewInvoice(
+      inv
+        ? {
+            ...inv,
+            items: (Array.isArray(inv.items) && inv.items.length > 0 ? inv.items : res?.items) || [],
+          }
+        : inv
+    );
   };
 
   const handleOpenPrint = async (id: number, fmt: 'a4' | '80mm' | '58mm') => {
     const res: any = await api.getSaleDetails(id);
+    const inv = res?.data || res?.invoice || res?.sale || res;
     setPrintFormat(fmt);
-    setPrintInvoice(res?.data || res?.invoice || res?.sale || res);
+    setPrintInvoice(
+      inv
+        ? {
+            ...inv,
+            items: (Array.isArray(inv.items) && inv.items.length > 0 ? inv.items : res?.items) || [],
+          }
+        : inv
+    );
   };
 
   const handleDeleteHeld = async (id: number) => {

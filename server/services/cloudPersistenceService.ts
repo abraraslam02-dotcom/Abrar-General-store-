@@ -1537,9 +1537,15 @@ export function hydrateSqliteFromCloudRecords(
         const invNo = String(s?.invoice_number || '').trim();
         if (!invNo) continue;
 
+        const sLines = Array.isArray(s?.items) ? s.items : Array.isArray(s?.lines) ? s.lines : [];
         const existing = db
           .prepare('SELECT id FROM sales WHERE invoice_number = ? OR (client_request_id IS NOT NULL AND client_request_id = ?)')
           .get(invNo, String(s?.client_tx_id || s?.client_request_id || '')) as { id: number } | undefined;
+
+        if (!existing && sLines.length === 0) {
+          // Never create header-only ghost sales invoices without any line items
+          continue;
+        }
 
         let targetSaleId = existing ? Number(existing.id) : 0;
 
@@ -1587,7 +1593,6 @@ export function hydrateSqliteFromCloudRecords(
           const existingLineCount = Number(
             (db.prepare('SELECT COUNT(*) as c FROM sale_items WHERE sale_id = ?').get(targetSaleId) as { c: number } | undefined)?.c || 0
           );
-          const sLines = Array.isArray(s?.items) ? s.items : Array.isArray(s?.lines) ? s.lines : [];
           if (existingLineCount === 0 && sLines.length > 0) {
             for (const ln of sLines) {
               const rawCode = String(ln?.item_code || '').trim();
@@ -1668,9 +1673,15 @@ export function hydrateSqliteFromCloudRecords(
         const billNo = String(p?.bill_number || p?.invoice_number || '').trim();
         if (!billNo) continue;
 
+        const pLines = Array.isArray(p?.items) ? p.items : Array.isArray(p?.lines) ? p.lines : [];
         const existing = db
           .prepare('SELECT id FROM purchases WHERE bill_number = ? OR (client_request_id IS NOT NULL AND client_request_id = ?)')
           .get(billNo, String(p?.client_tx_id || p?.client_request_id || '')) as { id: number } | undefined;
+
+        if (!existing && pLines.length === 0) {
+          // Never create header-only ghost purchase invoices without any line items
+          continue;
+        }
 
         let targetPurchaseId = existing ? Number(existing.id) : 0;
 
@@ -1715,7 +1726,6 @@ export function hydrateSqliteFromCloudRecords(
           const existingLineCount = Number(
             (db.prepare('SELECT COUNT(*) as c FROM purchase_items WHERE purchase_id = ?').get(targetPurchaseId) as { c: number } | undefined)?.c || 0
           );
-          const pLines = Array.isArray(p?.items) ? p.items : Array.isArray(p?.lines) ? p.lines : [];
           if (existingLineCount === 0 && pLines.length > 0) {
             for (const ln of pLines) {
               const rawCode = String(ln?.item_code || '').trim();

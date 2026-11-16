@@ -45,7 +45,7 @@ export interface Account {
   parent_account_id: number | null;
   parent_account_name?: string | null;
   parent_account_code?: string | null;
-  opening_balance: number;
+  opening_balance: number | null;
   opening_balance_type: 'Debit' | 'Credit';
   total_debit: number;
   total_credit: number;

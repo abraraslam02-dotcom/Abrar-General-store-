@@ -170,7 +170,7 @@ export const AccountFormModal: React.FC<AccountFormModalProps> = ({
         main_group: editingAccount.main_group,
         account_group: editingAccount.account_group,
         parent_account_id: editingAccount.parent_account_id,
-        opening_balance: editingAccount.opening_balance,
+        opening_balance: editingAccount.opening_balance ?? 0,
         opening_balance_type: editingAccount.opening_balance_type,
         contact_person: editingAccount.contact_person || '',
         phone: editingAccount.phone || '',

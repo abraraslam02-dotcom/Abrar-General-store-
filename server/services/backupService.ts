@@ -380,6 +380,26 @@ export function ensureDailyAutomaticBackup(): BackupRecord | null {
       return null;
     }
 
+    const totalBackupsRow = db
+      .prepare('SELECT COUNT(*) as c FROM backup_history')
+      .get() as { c: number } | undefined;
+    if (Number(totalBackupsRow?.c || 0) === 0) {
+      const txCount = ['sales', 'purchases', 'inventory', 'journal_entries', 'cash_book_vouchers'].reduce(
+        (sum, tbl) => {
+          try {
+            const row = db.prepare(`SELECT COUNT(*) as c FROM "${tbl}"`).get() as { c: number } | undefined;
+            return sum + Number(row?.c || 0);
+          } catch {
+            return sum;
+          }
+        },
+        0
+      );
+      if (txCount === 0) {
+        return null;
+      }
+    }
+
     return createDatabaseBackup({
       backupType: 'daily_auto',
       createdBy: 'System Scheduler',

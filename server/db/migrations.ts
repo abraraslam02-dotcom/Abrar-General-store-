@@ -161,7 +161,7 @@ export function runMigrations(): MigrationResult {
             main_group TEXT NOT NULL CHECK(main_group IN ('PARTY ACCOUNTS', 'FINANCIAL ACCOUNTS', 'INCOME & EXPENSE ACCOUNTS')),
             account_group TEXT NOT NULL,
             parent_account_id INTEGER,
-            opening_balance REAL NOT NULL DEFAULT 0.0 CHECK(opening_balance >= 0),
+            opening_balance REAL DEFAULT NULL CHECK(opening_balance IS NULL OR opening_balance >= 0),
             opening_balance_type TEXT NOT NULL DEFAULT 'Debit' CHECK(opening_balance_type IN ('Debit', 'Credit')),
             total_debit REAL NOT NULL DEFAULT 0.0,
             total_credit REAL NOT NULL DEFAULT 0.0,
@@ -3593,9 +3593,6 @@ export function runMigrations(): MigrationResult {
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
 
-      INSERT OR IGNORE INTO employee_sequences (prefix, last_number, updated_at)
-      VALUES ('EMP', 0, CURRENT_TIMESTAMP);
-
       CREATE TABLE IF NOT EXISTS employees (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         employee_code TEXT NOT NULL UNIQUE,
@@ -3940,6 +3937,9 @@ export function runMigrations(): MigrationResult {
     );
 
     if (!applied26) {
+      db.prepare(
+        "INSERT OR IGNORE INTO employee_sequences (prefix, last_number, updated_at) VALUES ('EMP', 0, CURRENT_TIMESTAMP)"
+      ).run();
       // Seed role permissions for Payroll & HR modules
       const payrollPermKeys = [
         'payroll',
@@ -4006,10 +4006,9 @@ export function runMigrations(): MigrationResult {
       .prepare('SELECT id FROM database_migrations WHERE migration_name = ?')
       .get(migrationName28);
 
-    ensureItemCodeSequenceTable(db);
-    ensureCitiesTableAndSync(db);
-
     if (!applied28) {
+      ensureItemCodeSequenceTable(db);
+      ensureCitiesTableAndSync(db);
       db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName28, 28);
     }
 
@@ -4020,9 +4019,8 @@ export function runMigrations(): MigrationResult {
       .prepare('SELECT id FROM database_migrations WHERE migration_name = ?')
       .get(migrationName29);
 
-    ensureItemCompaniesTableAndSync(db);
-
     if (!applied29) {
+      ensureItemCompaniesTableAndSync(db);
       db.prepare('INSERT INTO database_migrations (migration_name, batch) VALUES (?, ?)').run(migrationName29, 29);
     }
 

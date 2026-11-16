@@ -2428,12 +2428,32 @@ export const api = {
             extraCount++;
           }
           if (srvList.length > 0) {
-            const toStore = srvList.map((p: any) => ({
-              ...p,
-              server_id: p.server_id || p.id,
-              client_tx_id: p.client_tx_id || `PUR-${p.id || p.bill_number || p.invoice_number || Date.now()}`,
-              sync_status: p.sync_status || 'synced',
-            }));
+            const localPurByKey = new Map<string, any>();
+            const localPurBySrvId = new Map<number, any>();
+            for (const loc of existingLocal) {
+              if (loc?.client_tx_id) localPurByKey.set(String(loc.client_tx_id), loc);
+              const sid = Number(loc?.server_id || loc?.id || 0);
+              if (sid > 0 && sid < 1_000_000_000_000) localPurBySrvId.set(sid, loc);
+            }
+            const toStore = srvList.map((p: any) => {
+              const txKey = String(p.client_tx_id || `PUR-${p.id || p.bill_number || p.invoice_number || Date.now()}`);
+              const loc = localPurByKey.get(txKey) || localPurBySrvId.get(Number(p.id));
+              const srvItems = Array.isArray(p?.items) ? p.items : Array.isArray(p?.lines) ? p.lines : null;
+              const locItems = Array.isArray(loc?.items) && loc.items.length > 0
+                ? loc.items
+                : Array.isArray(loc?.lines) && loc.lines.length > 0
+                ? loc.lines
+                : [];
+              const preserveLocItems =
+                (!srvItems || (srvItems.length === 0 && Number(p?.item_count || 0) > 0)) && locItems.length > 0;
+              return {
+                ...p,
+                ...(preserveLocItems ? { items: locItems, lines: loc?.lines || locItems } : {}),
+                server_id: p.server_id || p.id,
+                client_tx_id: txKey,
+                sync_status: p.sync_status || 'synced',
+              };
+            });
             offlineStorage.bulkPut('purchases', toStore).catch(() => {});
           }
           data.purchases = srvList;
@@ -2556,35 +2576,65 @@ export const api = {
     try {
       const { res, data } = await authFetchRetryHtml(`/api/purchases/${id}`);
       if (res.ok && data.success) {
-        await offlineStorage.cacheApiData(`purchase_details_${id}`, data);
-        return data;
+        const resolvedItems =
+          Array.isArray(data.items) && data.items.length > 0
+            ? data.items
+            : Array.isArray(data.purchase?.items)
+            ? data.purchase.items
+            : [];
+        const normalizedPurchase = data.purchase
+          ? { ...data.purchase, items: resolvedItems }
+          : data.data
+          ? { ...data.data, items: resolvedItems }
+          : undefined;
+        const normalizedPayload = {
+          ...data,
+          ...(normalizedPurchase ? { purchase: normalizedPurchase, data: normalizedPurchase } : {}),
+          items: resolvedItems,
+        };
+        await offlineStorage.cacheApiData(`purchase_details_${id}`, normalizedPayload);
+        return normalizedPayload;
       }
     } catch {
-      // Offline fallback: read from synchronized IndexedDB purchases store first
+      // Offline fallback: combine synchronized IndexedDB purchases store and cached purchase details
     }
-    const allPurchases = await offlineStorage.getAll<any>('purchases');
+    const [allPurchases, cached] = await Promise.all([
+      offlineStorage.getAll<any>('purchases'),
+      offlineStorage.getCachedApiData<any>(`purchase_details_${id}`),
+    ]);
     const found = allPurchases.find(
       (p) =>
         String(p.id) === String(id) ||
         String(p.server_id) === String(id) ||
         String(p.client_tx_id) === String(id)
     );
-    if (found) {
+    if (found || cached) {
+      const basePurchase = found || cached?.purchase || cached?.data || {};
+      const resolvedItems =
+        Array.isArray(found?.items) && found.items.length > 0
+          ? found.items
+          : Array.isArray(found?.lines) && found.lines.length > 0
+          ? found.lines
+          : Array.isArray(cached?.items) && cached.items.length > 0
+          ? cached.items
+          : Array.isArray(cached?.purchase?.items) && cached.purchase.items.length > 0
+          ? cached.purchase.items
+          : [];
       const normalizedPurchase = {
-        ...found,
-        paid_amount: Number(found.paid_amount ?? 0),
+        ...basePurchase,
+        paid_amount: Number(basePurchase.paid_amount ?? 0),
+        items: resolvedItems,
       };
       return {
+        ...(cached || {}),
         success: true,
         offline: true,
         data: normalizedPurchase,
         purchase: normalizedPurchase,
-        items: found.items || [],
-        journalLines: [],
+        items: resolvedItems,
+        journalLines: cached?.journalLines || [],
       };
     }
-    const cached = await offlineStorage.getCachedApiData<any>(`purchase_details_${id}`);
-    if (cached) return { ...cached, offline: true };
     throw new Error('Purchase invoice details not found in local storage');
   },
 
@@ -3111,8 +3161,21 @@ export const api = {
             ) {
               return { ...srvSale, ...loc };
             }
+            const srvItems = Array.isArray(srvSale?.items)
+              ? srvSale.items
+              : Array.isArray(srvSale?.lines)
+              ? srvSale.lines
+              : null;
+            const locItems = Array.isArray(loc?.items) && loc.items.length > 0
+              ? loc.items
+              : Array.isArray(loc?.lines) && loc.lines.length > 0
+              ? loc.lines
+              : [];
+            const preserveLocItems =
+              (!srvItems || (srvItems.length === 0 && Number(srvSale?.item_count || 0) > 0)) && locItems.length > 0;
             const merged = {
               ...srvSale,
+              ...(preserveLocItems ? { items: locItems, lines: loc?.lines || locItems } : {}),
               server_id: srvSale.server_id || srvSale.id,
               client_tx_id: loc?.client_tx_id || txKey,
               sync_status: 'synced' as const,
@@ -3346,37 +3409,72 @@ export const api = {
     try {
       const { res, data } = await authFetchRetryHtml(`/api/sales/${id}`);
       if (res.ok && data.success) {
-        await offlineStorage.cacheApiData(`sale_details_${id}`, data);
-        return data;
+        const baseSale = data.data || data.invoice || data.sale || {};
+        const resolvedItems =
+          Array.isArray(baseSale?.items) && baseSale.items.length > 0
+            ? baseSale.items
+            : Array.isArray(baseSale?.lines) && baseSale.lines.length > 0
+            ? baseSale.lines
+            : Array.isArray(data.items)
+            ? data.items
+            : [];
+        const normalizedSale = {
+          ...baseSale,
+          items: resolvedItems,
+        };
+        const normalizedPayload = {
+          ...data,
+          data: normalizedSale,
+          invoice: normalizedSale,
+          sale: normalizedSale,
+          items: resolvedItems,
+        };
+        await offlineStorage.cacheApiData(`sale_details_${id}`, normalizedPayload);
+        return normalizedPayload;
       }
     } catch {
-      // Offline fallback: read from synchronized IndexedDB sales store first
+      // Offline fallback: combine synchronized IndexedDB sales store and cached sale details
     }
-    const allSales = await offlineStorage.getAll<any>('sales');
+    const [allSales, cached] = await Promise.all([
+      offlineStorage.getAll<any>('sales'),
+      offlineStorage.getCachedApiData<any>(`sale_details_${id}`),
+    ]);
     const found = allSales.find(
       (s) =>
         String(s.id) === String(id) ||
         String(s.server_id) === String(id) ||
-        String(s.client_tx_id) === String(id)
+        String(s.client_tx_id) === String(id) ||
+        (s.invoice_number && String(s.invoice_number).toLowerCase() === String(id).toLowerCase())
     );
-    if (found) {
+    if (found || cached) {
+      const baseSale = found || cached?.data || cached?.invoice || cached?.sale || {};
+      const resolvedItems =
+        Array.isArray(found?.items) && found.items.length > 0
+          ? found.items
+          : Array.isArray(found?.lines) && found.lines.length > 0
+          ? found.lines
+          : Array.isArray(cached?.data?.items) && cached.data.items.length > 0
+          ? cached.data.items
+          : Array.isArray(cached?.items) && cached.items.length > 0
+          ? cached.items
+          : [];
       const normalizedSale = {
-        ...found,
-        paid_amount: Number(found.paid_amount ?? 0),
-        buyer_name: String(found.buyer_name ?? ''),
+        ...baseSale,
+        paid_amount: Number(baseSale.paid_amount ?? 0),
+        buyer_name: String(baseSale.buyer_name ?? ''),
+        items: resolvedItems,
       };
       return {
+        ...(cached || {}),
         success: true,
         offline: true,
         data: normalizedSale,
         invoice: normalizedSale,
         sale: normalizedSale,
-        items: found.items || found.lines || [],
-        journalLines: [],
+        items: resolvedItems,
+        journalLines: cached?.journalLines || baseSale?.journalLines || [],
       };
     }
-    const cached = await offlineStorage.getCachedApiData<any>(`sale_details_${id}`);
-    if (cached) return { ...cached, offline: true };
     throw new Error('Sales invoice details not found in local storage');
   },
 

@@ -279,14 +279,24 @@ systemRouter.put('/settings', authenticateToken, (req: Request, res: Response) =
   try {
     const db = getDatabase();
     const body = req.body || {};
-    const existing = db.prepare('SELECT * FROM company_settings LIMIT 1').get() as
+    let existing = db.prepare('SELECT * FROM company_settings LIMIT 1').get() as
       | Record<string, unknown>
       | undefined;
 
     if (!existing) {
-      return res.status(404).json({
+      const initName = String(body.store_name || config.companyName || 'Abrar Medical Store').trim();
+      const insertRes = db
+        .prepare('INSERT INTO company_settings (store_name) VALUES (?)')
+        .run(initName);
+      existing = db
+        .prepare('SELECT * FROM company_settings WHERE id = ?')
+        .get(insertRes.lastInsertRowid) as Record<string, unknown> | undefined;
+    }
+
+    if (!existing) {
+      return res.status(500).json({
         success: false,
-        error: 'Company settings record not found.',
+        error: 'Failed to initialize company settings record.',
       });
     }
 

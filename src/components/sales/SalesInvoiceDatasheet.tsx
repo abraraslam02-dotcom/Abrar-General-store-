@@ -2125,9 +2125,16 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       }
 
       if (autoPrintFormat) {
-        const fullDetails = await api.getSaleDetails(savedInvoice.id);
+        const fullDetails: any = await api.getSaleDetails(savedInvoice.id);
+        const fullInv = fullDetails?.data || fullDetails?.invoice || fullDetails?.sale || savedInvoice;
         setPrintFormat(autoPrintFormat);
-        setPrintInvoice(fullDetails.data);
+        setPrintInvoice({
+          ...fullInv,
+          items:
+            (Array.isArray(fullInv?.items) && fullInv.items.length > 0
+              ? fullInv.items
+              : fullDetails?.items) || [],
+        });
       }
 
       await resetToNewInvoice();
@@ -2148,9 +2155,14 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         setErrorMsg('No previous completed Sales Invoice found to reprint.');
         return;
       }
-      const details = await api.getSaleDetails(last.id);
+      const details: any = await api.getSaleDetails(last.id);
+      const inv = details?.data || details?.invoice || details?.sale || last;
       setPrintFormat('a4');
-      setPrintInvoice(details.data);
+      setPrintInvoice({
+        ...inv,
+        items:
+          (Array.isArray(inv?.items) && inv.items.length > 0 ? inv.items : details?.items) || [],
+      });
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
     }

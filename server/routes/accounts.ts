@@ -71,7 +71,7 @@ export interface AccountRow {
   parent_account_id: number | null;
   parent_account_name?: string | null;
   parent_account_code?: string | null;
-  opening_balance: number;
+  opening_balance: number | null;
   opening_balance_type: 'Debit' | 'Credit';
   total_debit: number;
   total_credit: number;
@@ -652,8 +652,8 @@ accountsRouter.get('/', (req: Request, res: Response) => {
           SUM(CASE WHEN main_group = 'INCOME & EXPENSE ACCOUNTS' THEN 1 ELSE 0 END) as income_expense_count,
           SUM(CASE WHEN account_group IN ('Customer', 'Customer & Supplier') THEN 1 ELSE 0 END) as customer_ledger_count,
           SUM(CASE WHEN account_group IN ('Supplier', 'Customer & Supplier') THEN 1 ELSE 0 END) as supplier_ledger_count,
-          COALESCE(SUM(CASE WHEN opening_balance_type = 'Debit' THEN opening_balance ELSE 0 END), 0) as total_opening_debit,
-          COALESCE(SUM(CASE WHEN opening_balance_type = 'Credit' THEN opening_balance ELSE 0 END), 0) as total_opening_credit,
+          COALESCE(SUM(CASE WHEN opening_balance_type = 'Debit' THEN COALESCE(opening_balance, 0) ELSE 0 END), 0) as total_opening_debit,
+          COALESCE(SUM(CASE WHEN opening_balance_type = 'Credit' THEN COALESCE(opening_balance, 0) ELSE 0 END), 0) as total_opening_credit,
           COALESCE(SUM(total_debit), 0) as grand_total_debit,
           COALESCE(SUM(total_credit), 0) as grand_total_credit,
           COALESCE(SUM(CASE WHEN account_group IN ('Customer', 'Customer & Supplier') AND current_balance_type = 'Debit' THEN current_balance ELSE 0 END), 0) as total_customer_receivables,

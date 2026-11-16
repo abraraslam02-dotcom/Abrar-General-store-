@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     account_group TEXT NOT NULL,
     account_type TEXT NOT NULL DEFAULT '',
     parent_account_id INTEGER,
-    opening_balance REAL NOT NULL DEFAULT 0.0 CHECK(opening_balance >= 0),
+    opening_balance REAL DEFAULT NULL CHECK(opening_balance IS NULL OR opening_balance >= 0),
     opening_balance_type TEXT NOT NULL DEFAULT 'Debit' CHECK(opening_balance_type IN ('Debit', 'Credit')),
     total_debit REAL NOT NULL DEFAULT 0.0,
     total_credit REAL NOT NULL DEFAULT 0.0,

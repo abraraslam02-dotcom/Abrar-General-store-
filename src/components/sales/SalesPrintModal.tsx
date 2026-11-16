@@ -10,6 +10,7 @@ import {
   Save,
   Ban,
   Eye,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   CompanySettings,
@@ -47,11 +48,15 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
   autoDirectPrint = false,
   onClose,
 }) => {
-  const docRecord = mode === 'return' ? saleReturn || invoice : invoice;
+  const rawDocRecord = mode === 'return' ? saleReturn || invoice : invoice;
   const isReturn = mode === 'return' || Boolean(saleReturn && !invoice);
 
   const printAreaRef = useRef<HTMLDivElement | null>(null);
   const hasAutoPrintedRef = useRef<boolean>(false);
+  const fetchedSaleIdRef = useRef<string | number | null>(null);
+
+  const [fetchedDoc, setFetchedDoc] = useState<Record<string, any> | null>(null);
+  const [loadingDetails, setLoadingDetails] = useState<boolean>(false);
 
   const [settings, setSettings] = useState<CompanySettings | null>(null);
   const [format, setFormat] = useState<PaperSizeOption>(initialFormat || 'a4');
@@ -71,6 +76,57 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
   const [savingDefaults, setSavingDefaults] = useState<boolean>(false);
   const [saveFeedback, setSaveFeedback] = useState<string | null>(null);
   const [moreOptions, setMoreOptions] = useState<any>(null);
+
+  useEffect(() => {
+    setFetchedDoc(null);
+    fetchedSaleIdRef.current = null;
+    if (!rawDocRecord || isReturn) {
+      setLoadingDetails(false);
+      return;
+    }
+    const existingItems = Array.isArray(rawDocRecord.items)
+      ? rawDocRecord.items
+      : Array.isArray(rawDocRecord.lines)
+      ? rawDocRecord.lines
+      : [];
+    const recId = Number(rawDocRecord.id || 0);
+    if (existingItems.length > 0 || recId <= 0) {
+      setLoadingDetails(false);
+      return;
+    }
+    let mounted = true;
+    fetchedSaleIdRef.current = recId;
+    setLoadingDetails(true);
+    api
+      .getSaleDetails(recId)
+      .then((res: any) => {
+        if (!mounted) return;
+        const full = res?.data || res?.invoice || res?.sale || null;
+        const loadedItems = Array.isArray(full?.items) && full.items.length > 0
+          ? full.items
+          : Array.isArray(res?.items)
+          ? res.items
+          : [];
+        if (full) {
+          setFetchedDoc({
+            ...full,
+            items: loadedItems,
+            journalLines: full.journalLines || res?.journalLines || [],
+          });
+        }
+      })
+      .catch(() => {
+        // Keep rawDocRecord if fetch fails
+      })
+      .finally(() => {
+        if (mounted) setLoadingDetails(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [rawDocRecord, isReturn]);
+
+  const docRecord = fetchedDoc || rawDocRecord;
 
   useEffect(() => {
     let mounted = true;
@@ -127,19 +183,21 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
   };
 
   useEffect(() => {
-    if (autoDirectPrint && docRecord && settings && !hasAutoPrintedRef.current) {
+    if (autoDirectPrint && docRecord && settings && !loadingDetails && !hasAutoPrintedRef.current) {
       hasAutoPrintedRef.current = true;
       const timer = setTimeout(() => {
         handlePrintNow();
       }, 250);
       return () => clearTimeout(timer);
     }
-  }, [autoDirectPrint, docRecord, settings]);
+  }, [autoDirectPrint, docRecord, settings, loadingDetails]);
 
   if (!docRecord) return null;
 
-  const items: Array<Record<string, any>> = Array.isArray(docRecord.items)
+  const items: Array<Record<string, any>> = Array.isArray(docRecord.items) && docRecord.items.length > 0
     ? docRecord.items
+    : Array.isArray(docRecord.lines)
+    ? docRecord.lines
     : [];
 
   const isCancelled = String(docRecord.status || '').toLowerCase() === 'cancelled';
@@ -586,6 +644,18 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
           </div>
         )}
 
+        {/* Missing Items / Loading Details Diagnostic Banner */}
+        {(loadingDetails || (!isReturn && items.length === 0)) && (
+          <div className="bg-amber-50 border-b border-amber-300 px-4 py-2 text-xs text-amber-950 flex items-center gap-2 print:hidden">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>
+              {loadingDetails
+                ? 'Loading invoice line items from database...'
+                : `No line items are saved on invoice ${docRecord.invoice_number || docRecord.id} in the active database (0 item rows in sale_items; header totals only). Edit the invoice or restore a backup that contains its items.`}
+            </span>
+          </div>
+        )}
+
         {/* Scrollable Print Preview Viewport */}
         <div className="flex-1 overflow-y-auto p-4 lg:p-6 bg-slate-100 flex justify-center print:p-0 print:bg-white print:overflow-visible">
           {format === 'a4' ? (
@@ -855,6 +925,18 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                       </tr>
                     );
                   })}
+                  {items.length === 0 && (
+                    <tr>
+                      <td
+                        colSpan={12}
+                        className="py-5 px-3 text-center text-xs font-semibold text-amber-800 bg-amber-50/60 border border-slate-200"
+                      >
+                        {loadingDetails
+                          ? 'Loading invoice items...'
+                          : 'No saved item rows exist for this invoice in the database (0 items).'}
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
 
@@ -1348,6 +1430,18 @@ export const SalesPrintModal: React.FC<SalesPrintModalProps> = ({
                           </tr>
                         );
                       })}
+                      {items.length === 0 && (
+                        <tr>
+                          <td
+                            colSpan={7}
+                            className="border border-black px-2 py-2 text-center font-bold text-[10px]"
+                          >
+                            {loadingDetails
+                              ? 'Loading items...'
+                              : 'No saved item rows in database (0 items)'}
+                          </td>
+                        </tr>
+                      )}
                     </tbody>
                   </table>
                 );

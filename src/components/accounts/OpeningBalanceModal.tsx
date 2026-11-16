@@ -35,7 +35,7 @@ export const OpeningBalanceModal: React.FC<OpeningBalanceModalProps> = ({
       > = {};
       accounts.forEach((acc) => {
         initial[acc.id] = {
-          opening_balance: acc.opening_balance,
+          opening_balance: acc.opening_balance ?? 0,
           opening_balance_type: acc.opening_balance_type,
         };
       });
@@ -226,7 +226,7 @@ export const OpeningBalanceModal: React.FC<OpeningBalanceModalProps> = ({
             <tbody className="divide-y divide-slate-100">
               {filteredAccounts.map((acc) => {
                 const draft = drafts[acc.id] || {
-                  opening_balance: acc.opening_balance,
+                  opening_balance: acc.opening_balance ?? 0,
                   opening_balance_type: acc.opening_balance_type,
                 };
                 return (
