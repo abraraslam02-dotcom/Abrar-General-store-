@@ -88,6 +88,11 @@ async function startServer() {
   app.use('/api/enhancements', enhancementsRouter);
   app.use('/api/lookup', authenticateToken, lookupRouter);
 
+  // Ensure unmatched /api/* routes always return JSON 404 instead of SPA HTML fallback
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ success: false, error: 'API endpoint not found.' });
+  });
+
   // Prevent browser/proxy HTTP caching on HTML shell and Service Worker scripts
   app.use((req, res, next) => {
     if (

@@ -701,6 +701,9 @@ const handleGetItemHistory = (req: Request, res: Response) => {
     const rawQueryCode = String(req.query.itemCode || '').trim();
     const rawQueryItemId = Number(req.query.itemId || 0);
     const customerId = Number(req.query.customerId || 0);
+    const salesOnly =
+      String(req.query.salesOnly || '').trim().toLowerCase() === 'true' ||
+      String(req.query.salesOnly || '').trim() === '1';
 
     const lookupCode = rawQueryCode || rawParam;
     if (!lookupCode && !rawQueryItemId) {
@@ -803,21 +806,7 @@ const handleGetItemHistory = (req: Request, res: Response) => {
       LEFT JOIN accounts a ON a.id = s.customer_account_id
     `;
 
-    // 1. Latest 10 Sales Transactions across all customers (sorted by Invoice Date DESC, then Invoice Number DESC)
-    const salesHistory = db
-      .prepare(`
-        ${saleSelectSql}
-        WHERE (
-          LOWER(TRIM(COALESCE(NULLIF(TRIM(si.item_code), ''), i.item_code, ''))) IN (${codePlaceholders})
-          OR si.item_id = ?
-        )
-          AND LOWER(COALESCE(s.status, 'completed')) = 'completed'
-        ORDER BY DATE(s.invoice_date) DESC, s.invoice_date DESC, s.invoice_number DESC, s.id DESC, si.id DESC
-        LIMIT 10
-      `)
-      .all(resolvedItemId, canonicalItemCode, ...codeList, resolvedItemId) as Array<Record<string, unknown>>;
-
-    // 2. Customer-Specific Confirmed Sales History (for highlighting last sale to currently selected customer)
+    // 1. Customer-Specific Confirmed Sales History (strictly filtered by AccountID AND ItemCode/ItemID)
     let customerSalesHistory: Array<Record<string, unknown>> = [];
     if (customerId > 0) {
       customerSalesHistory = db
@@ -828,9 +817,9 @@ const handleGetItemHistory = (req: Request, res: Response) => {
             OR si.item_id = ?
           )
             AND s.customer_account_id = ?
-            AND LOWER(COALESCE(s.status, 'completed')) = 'completed'
+            AND LOWER(TRIM(COALESCE(s.status, 'completed'))) IN ('completed', 'posted')
           ORDER BY DATE(s.invoice_date) DESC, s.invoice_date DESC, s.invoice_number DESC, s.id DESC, si.id DESC
-          LIMIT 10
+          LIMIT 25
         `)
         .all(resolvedItemId, canonicalItemCode, ...codeList, resolvedItemId, customerId) as Array<Record<string, unknown>>;
     }
@@ -838,7 +827,37 @@ const handleGetItemHistory = (req: Request, res: Response) => {
     const lastCustomerSale = customerSalesHistory.length > 0 ? customerSalesHistory[0] : null;
     const previousCustomerSaleBeforeLast = customerSalesHistory.length > 1 ? customerSalesHistory[1] : null;
 
-    // 3. Latest 10 Confirmed Purchase Transactions for this ItemCode (sorted by Invoice Date DESC, then Invoice Number DESC)
+    if (salesOnly) {
+      return res.json({
+        success: true,
+        itemCode: canonicalItemCode,
+        item: itemRow,
+        customerId: customerId > 0 ? customerId : null,
+        hasCustomerHistory: customerSalesHistory.length > 0,
+        lastCustomerSale,
+        previousCustomerSaleBeforeLast,
+        customerSalesHistory,
+        salesHistory: customerSalesHistory,
+        lastPurchase: null,
+        purchaseHistory: [],
+      });
+    }
+
+    // 2. Latest 10 Sales Transactions across all customers (used by Purchase Item History view)
+    const salesHistory = db
+      .prepare(`
+        ${saleSelectSql}
+        WHERE (
+          LOWER(TRIM(COALESCE(NULLIF(TRIM(si.item_code), ''), i.item_code, ''))) IN (${codePlaceholders})
+          OR si.item_id = ?
+        )
+          AND LOWER(TRIM(COALESCE(s.status, 'completed'))) IN ('completed', 'posted')
+        ORDER BY DATE(s.invoice_date) DESC, s.invoice_date DESC, s.invoice_number DESC, s.id DESC, si.id DESC
+        LIMIT 10
+      `)
+      .all(resolvedItemId, canonicalItemCode, ...codeList, resolvedItemId) as Array<Record<string, unknown>>;
+
+    // 3. Latest 10 Confirmed Purchase Transactions for this ItemCode (used by Purchase Item History view)
     const purchaseHistory = db
       .prepare(`
         SELECT
@@ -884,7 +903,7 @@ const handleGetItemHistory = (req: Request, res: Response) => {
           LOWER(TRIM(COALESCE(NULLIF(TRIM(pi.item_code), ''), it.item_code, ''))) IN (${codePlaceholders})
           OR pi.item_id = ?
         )
-          AND LOWER(COALESCE(p.status, 'completed')) = 'completed'
+          AND LOWER(TRIM(COALESCE(p.status, 'completed'))) IN ('completed', 'posted')
         ORDER BY DATE(p.bill_date) DESC, p.bill_date DESC, p.bill_number DESC, p.id DESC, pi.id DESC
         LIMIT 10
       `)

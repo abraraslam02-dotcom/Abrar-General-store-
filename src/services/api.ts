@@ -303,6 +303,38 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   return res;
 }
 
+async function parseJsonSafe(res: Response): Promise<any> {
+  const contentType = String(res.headers.get('content-type') || '').toLowerCase();
+  const rawText = await res.text();
+  const trimmed = rawText.trim();
+  if (!trimmed) return {};
+  const looksLikeHtml = trimmed.startsWith('<!') || trimmed.toLowerCase().startsWith('<html');
+  if (looksLikeHtml || (!contentType.includes('application/json') && !contentType.includes('+json') && trimmed.startsWith('<'))) {
+    throw new Error('NON_JSON_HTML_RESPONSE');
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    throw new Error(`Invalid JSON response from server (HTTP ${res.status})`);
+  }
+}
+
+async function authFetchRetryHtml(url: string, init?: RequestInit): Promise<{ res: Response; data: any }> {
+  let res = await authFetch(url, init);
+  try {
+    const data = await parseJsonSafe(res);
+    return { res, data };
+  } catch (err: any) {
+    if (err?.message === 'NON_JSON_HTML_RESPONSE') {
+      await new Promise((r) => setTimeout(r, 350));
+      res = await authFetch(url, init);
+      const data = await parseJsonSafe(res);
+      return { res, data };
+    }
+    throw err;
+  }
+}
+
 function round2Local(val: number): number {
   return Math.round((Number(val) || 0) * 100) / 100;
 }
@@ -2333,9 +2365,8 @@ export const api = {
     if (params?.exportAll) query.append('exportAll', 'true');
 
     try {
-      const res = await authFetch(`/api/purchases?${query.toString()}`);
+      const { res, data } = await authFetchRetryHtml(`/api/purchases?${query.toString()}`);
       if (res.ok) {
-        const data = await res.json();
         if (data.success) {
           const srvList: any[] = Array.isArray(data.purchases)
             ? data.purchases
@@ -2411,19 +2442,22 @@ export const api = {
         }
       }
       if (res.status >= 400) {
-        const errBody = await res.json().catch(() => ({}));
-        throw new Error(errBody?.error || `Failed to load purchase invoices (HTTP ${res.status})`);
+        throw new Error(data?.error || `Failed to load purchase invoices (HTTP ${res.status})`);
       }
     } catch (err: any) {
+      const msg = String(err?.message || '');
+      const isTransientHtmlOrNet =
+        msg === 'NON_JSON_HTML_RESPONSE' ||
+        msg.includes('Failed to fetch') ||
+        msg.includes('NetworkError');
       if (
-        err?.message &&
-        !err.message.includes('Failed to fetch') &&
-        !err.message.includes('NetworkError') &&
+        msg &&
+        !isTransientHtmlOrNet &&
         (typeof navigator === 'undefined' || navigator.onLine !== false)
       ) {
         throw err;
       }
-      // Offline fallback from IndexedDB
+      // Offline / transient fallback from IndexedDB
     }
     let localPurchases = await offlineStorage.getAll<any>('purchases');
     if (params?.status && params.status !== 'all') {
@@ -2520,8 +2554,7 @@ export const api = {
    */
   async getPurchaseDetails(id: number | string) {
     try {
-      const res = await authFetch(`/api/purchases/${id}`);
-      const data = await res.json();
+      const { res, data } = await authFetchRetryHtml(`/api/purchases/${id}`);
       if (res.ok && data.success) {
         await offlineStorage.cacheApiData(`purchase_details_${id}`, data);
         return data;
@@ -3042,9 +3075,8 @@ export const api = {
     }
 
     try {
-      const res = await authFetch(`/api/sales?${query.toString()}`);
+      const { res, data } = await authFetchRetryHtml(`/api/sales?${query.toString()}`);
       if (res.ok) {
-        const data = await res.json();
         if (data.success) {
           const rows: any[] = Array.isArray(data.data)
             ? data.data
@@ -3207,19 +3239,22 @@ export const api = {
         }
       }
       if (res.status >= 400) {
-        const errBody = await res.json().catch(() => ({}));
-        throw new Error(errBody?.error || `Failed to load sales invoices (HTTP ${res.status})`);
+        throw new Error(data?.error || `Failed to load sales invoices (HTTP ${res.status})`);
       }
     } catch (err: any) {
+      const msg = String(err?.message || '');
+      const isTransientHtmlOrNet =
+        msg === 'NON_JSON_HTML_RESPONSE' ||
+        msg.includes('Failed to fetch') ||
+        msg.includes('NetworkError');
       if (
-        err?.message &&
-        !err.message.includes('Failed to fetch') &&
-        !err.message.includes('NetworkError') &&
+        msg &&
+        !isTransientHtmlOrNet &&
         (typeof navigator === 'undefined' || navigator.onLine !== false)
       ) {
         throw err;
       }
-      // Offline fallback from latest synchronized IndexedDB
+      // Offline / transient fallback from latest synchronized IndexedDB
     }
     let localSales = await offlineStorage.getAll<any>('sales');
     if (params?.status && params.status !== 'all') {
@@ -3309,8 +3344,7 @@ export const api = {
    */
   async getSaleDetails(id: number | string) {
     try {
-      const res = await authFetch(`/api/sales/${id}`);
-      const data = await res.json();
+      const { res, data } = await authFetchRetryHtml(`/api/sales/${id}`);
       if (res.ok && data.success) {
         await offlineStorage.cacheApiData(`sale_details_${id}`, data);
         return data;
@@ -5846,10 +5880,12 @@ export const api = {
   async getItemCustomerHistory(
     itemCodeOrId: string | number,
     customerId?: number | null,
-    itemCodeOverride?: string
+    itemCodeOverride?: string,
+    options?: { salesOnly?: boolean }
   ) {
     const cleanCode = String(itemCodeOverride || itemCodeOrId || '').trim();
     const numericId = typeof itemCodeOrId === 'number' && itemCodeOrId > 0 ? itemCodeOrId : 0;
+    const salesOnly = Boolean(options?.salesOnly);
 
     const query = new URLSearchParams();
     if (cleanCode) {
@@ -5861,11 +5897,13 @@ export const api = {
     if (customerId && customerId > 0) {
       query.append('customerId', String(customerId));
     }
+    if (salesOnly) {
+      query.append('salesOnly', 'true');
+    }
 
     const pathKey = encodeURIComponent(cleanCode || String(numericId));
     try {
-      const res = await authFetch(`/api/sales/item-history/${pathKey}?${query.toString()}`);
-      const data = await res.json();
+      const { res, data } = await authFetchRetryHtml(`/api/sales/item-history/${pathKey}?${query.toString()}`);
       if (res.ok && data.success) return data;
     } catch {
       // Offline fallback
@@ -5952,11 +5990,28 @@ export const api = {
       return String(b.invoice_number || '').localeCompare(String(a.invoice_number || ''), undefined, { numeric: true });
     });
 
-    const salesHistory = allMatchedSales.slice(0, 10);
     const customerSalesHistory =
       customerId && customerId > 0
-        ? allMatchedSales.filter((row) => Number(row.customer_account_id) === Number(customerId)).slice(0, 10)
+        ? allMatchedSales.filter((row) => Number(row.customer_account_id) === Number(customerId)).slice(0, 25)
         : [];
+    const salesHistory = salesOnly ? customerSalesHistory : allMatchedSales.slice(0, 10);
+
+    if (salesOnly) {
+      return {
+        success: true,
+        offline: true,
+        itemCode: canonicalItemCode,
+        item,
+        customerId: customerId && customerId > 0 ? customerId : null,
+        hasCustomerHistory: customerSalesHistory.length > 0,
+        lastCustomerSale: customerSalesHistory[0] || null,
+        previousCustomerSaleBeforeLast: customerSalesHistory[1] || null,
+        customerSalesHistory,
+        salesHistory: customerSalesHistory,
+        lastPurchase: null,
+        purchaseHistory: [],
+      };
+    }
 
     const allMatchedPurchases: any[] = [];
     for (const p of allPurchases) {

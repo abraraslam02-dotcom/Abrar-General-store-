@@ -703,7 +703,12 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }
   }, [customerAccountId, editingSaleId, refreshCustomerBalanceSummary]);
 
-  // Fetch Item Sale History & Purchase History by unique ItemCode
+  const activeCustomerIdRef = useRef<number>(customerAccountId);
+  useEffect(() => {
+    activeCustomerIdRef.current = customerAccountId;
+  }, [customerAccountId]);
+
+  // Fetch Customer + Item Sales History by unique ItemCode (strictly scoped to selected customer AccountID)
   const fetchAndApplyItemHistory = useCallback(
     async (
       rowIndex: number,
@@ -717,25 +722,95 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       if (!cleanItemCode && !itemId) return;
       const codeKey = cleanItemCode ? `${cleanItemCode.toLowerCase()}_${custId || 0}` : '';
       const idKey = itemId ? `${itemId}_${custId || 0}` : '';
+
+      // If no customer is selected, clear any stale customer sale metadata and do not fetch other customers' history
+      if (!custId || custId <= 0) {
+        setRows((prev) => {
+          const next = [...prev];
+          const target = next[rowIndex];
+          if (!target) return prev;
+          if (
+            target.lastCustomerSaleRate === null &&
+            target.lastCustomerSaleDate === null &&
+            target.lastCustomerInvoiceNo === null
+          ) {
+            return prev;
+          }
+          next[rowIndex] = {
+            ...target,
+            lastCustomerSaleRate: null,
+            lastCustomerDiscountPercent: null,
+            lastCustomerSaleDate: null,
+            lastCustomerInvoiceNo: null,
+            lastCustomerSoldQty: null,
+            previousCustomerSaleRateBeforeLast: null,
+          };
+          return next;
+        });
+        if (applySuggestedOffers && itemId > 0) {
+          const resCalc = await fetch('/api/enhancements/calculate-line', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              item_id: itemId,
+              quantity: 0,
+              party_account_id: null,
+            }),
+          }).then((r) => r.json()).catch(() => null);
+
+          if (resCalc?.success && resCalc.calculation) {
+            const calc = resCalc.calculation;
+            if (calc.effective_discount_percent > 0 || calc.bonus_quantity > 0) {
+              setRows((prev) => {
+                const next = [...prev];
+                const target = next[rowIndex];
+                if (!target || target.item_id !== itemId || target.isRateManuallyEdited) return prev;
+                const updated = { ...target };
+                if (calc.effective_discount_percent > 0) {
+                  updated.discount_percent = round2(calc.effective_discount_percent);
+                }
+                if (calc.bonus_quantity > 0) {
+                  updated.bonus_quantity = round2(calc.bonus_quantity);
+                }
+                next[rowIndex] = recalcRow(updated);
+                return next;
+              });
+            }
+          }
+        }
+        return;
+      }
+
       try {
         setHistoryLoading(true);
         const res: CustomerItemHistoryResponse = await api.getItemCustomerHistory(
           itemId || cleanItemCode,
           custId,
-          cleanItemCode
+          cleanItemCode,
+          { salesOnly: true }
         );
+        // Ignore stale async response if user switched to a different customer while request was in flight
+        if (activeCustomerIdRef.current !== custId) {
+          return;
+        }
         const resolvedCode = String(res.itemCode || res.item?.item_code || cleanItemCode || '').trim().toLowerCase();
         setItemHistoryMap((prev) => {
           const next = { ...prev };
           if (codeKey) next[codeKey] = res;
-          if (resolvedCode) next[`${resolvedCode}_${custId || 0}`] = res;
+          if (resolvedCode) next[`${resolvedCode}_${custId}`] = res;
           if (idKey) next[idKey] = res;
           return next;
         });
 
-        const lastSale = res.lastCustomerSale;
-        const prevBeforeLast = res.previousCustomerSaleBeforeLast;
-        const lastPur = res.lastPurchase;
+        const lastSale =
+          res.lastCustomerSale && Number(res.lastCustomerSale.customer_account_id) === Number(custId)
+            ? res.lastCustomerSale
+            : null;
+        const prevBeforeLast =
+          res.previousCustomerSaleBeforeLast &&
+          Number(res.previousCustomerSaleBeforeLast.customer_account_id) === Number(custId)
+            ? res.previousCustomerSaleBeforeLast
+            : null;
 
         setRows((prev) => {
           const next = [...prev];
@@ -758,9 +833,6 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             lastCustomerInvoiceNo: lastSale ? String(lastSale.invoice_number) : null,
             lastCustomerSoldQty: lastSale ? Number(lastSale.quantity || 0) : null,
             previousCustomerSaleRateBeforeLast: prevBeforeLast ? round2(prevBeforeLast.unit_price) : null,
-            lastPurchaseCostRate: lastPur ? round2(lastPur.purchase_price) : target.lastPurchaseCostRate ?? null,
-            lastPurchaseDate: lastPur ? String(lastPur.bill_date) : null,
-            lastSupplierName: lastPur ? String(lastPur.supplier_name || '') : null,
           };
 
           // Default Sale Price always follows Invoice Type (MRP for Retail, Wholesale Price for Wholesale)
@@ -804,7 +876,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
       } catch {
         // ignore network hiccup
       } finally {
-        setHistoryLoading(false);
+        if (activeCustomerIdRef.current === custId) {
+          setHistoryLoading(false);
+        }
       }
     },
     []
@@ -850,11 +924,14 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     []
   );
 
-  // When Customer changes, refresh Customer-Wise Last Sale History metadata without modifying existing row prices/discounts
+  // When Customer changes, clear stale history and refresh Customer-Wise Sales History for populated rows
   const prevCustomerIdRef = useRef<number>(customerAccountId);
   useEffect(() => {
     if (prevCustomerIdRef.current !== customerAccountId) {
       prevCustomerIdRef.current = customerAccountId;
+      if (!customerAccountId || customerAccountId <= 0) {
+        setHistoryLoading(false);
+      }
       rows.forEach((r, idx) => {
         if (r.item_id || r.item_code) {
           fetchAndApplyItemHistory(idx, Number(r.item_id || 0), customerAccountId, invoiceType, false, r.item_code);
@@ -863,26 +940,23 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }
   }, [customerAccountId, rows, invoiceType, fetchAndApplyItemHistory]);
 
-  // Ensure the currently selected row always has its Item History loaded by ItemCode (even if customerAccountId is 0)
+  // Refresh the currently selected row's Customer Sales History whenever selected row, item, or customer changes
+  const selectedRowItemId = rows[selectedRowIndex]?.item_id || 0;
+  const selectedRowItemCode = rows[selectedRowIndex]?.item_code || '';
   useEffect(() => {
-    const activeRow = rows[selectedRowIndex];
-    if (activeRow && (activeRow.item_code || activeRow.item_id)) {
-      const codeKey = activeRow.item_code
-        ? `${activeRow.item_code.trim().toLowerCase()}_${customerAccountId || 0}`
-        : `${activeRow.item_id}_${customerAccountId || 0}`;
-      if (!itemHistoryMap[codeKey]) {
-        fetchAndApplyItemHistory(
-          selectedRowIndex,
-          Number(activeRow.item_id || 0),
-          customerAccountId,
-          invoiceType,
-          false,
-          activeRow.item_code
-        );
-      }
+    const active = rows[selectedRowIndex];
+    if (active && (active.item_code || active.item_id)) {
+      fetchAndApplyItemHistory(
+        selectedRowIndex,
+        Number(active.item_id || 0),
+        customerAccountId,
+        invoiceType,
+        false,
+        active.item_code
+      );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedRowIndex, customerAccountId]);
+  }, [selectedRowIndex, selectedRowItemId, selectedRowItemCode, customerAccountId]);
 
   // Automatically update next read-only invoice number when invoiceDate month/year changes on a new invoice
   useEffect(() => {
@@ -2046,6 +2120,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           : `Invoice ${savedInvoice.invoice_number} saved as ${targetStatus.toUpperCase()}.`
       );
 
+      if (targetStatus === 'completed') {
+        setItemHistoryMap({});
+      }
+
       if (autoPrintFormat) {
         const fullDetails = await api.getSaleDetails(savedInvoice.id);
         setPrintFormat(autoPrintFormat);
@@ -3161,16 +3239,20 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     return dm.name.toLowerCase().includes(t) || dm.deliveryman_code.toLowerCase().includes(t);
   });
 
-  // Active row & its ItemCode-based Item History
+  // Active row & its Customer-Specific Item History (never return cached entry for another customer)
   const activeRow = rows[selectedRowIndex] || rows[0];
-  const activeCodeHistoryKey = activeRow?.item_code
-    ? `${activeRow.item_code.trim().toLowerCase()}_${customerAccountId || 0}`
-    : '';
-  const activeIdHistoryKey = activeRow?.item_id ? `${activeRow.item_id}_${customerAccountId || 0}` : '';
+  const activeCodeHistoryKey =
+    customerAccountId > 0 && activeRow?.item_code
+      ? `${activeRow.item_code.trim().toLowerCase()}_${customerAccountId}`
+      : '';
+  const activeIdHistoryKey =
+    customerAccountId > 0 && activeRow?.item_id ? `${activeRow.item_id}_${customerAccountId}` : '';
   const activeItemHistory =
-    (activeCodeHistoryKey && itemHistoryMap[activeCodeHistoryKey]) ||
-    (activeIdHistoryKey && itemHistoryMap[activeIdHistoryKey]) ||
-    null;
+    customerAccountId > 0
+      ? (activeCodeHistoryKey && itemHistoryMap[activeCodeHistoryKey]) ||
+        (activeIdHistoryKey && itemHistoryMap[activeIdHistoryKey]) ||
+        null
+      : null;
 
   // POS Mode Helpers
   const handleQuickCash = (amt: number) => {
@@ -4222,8 +4304,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               itemCode={activeRow.item_code}
               itemName={activeRow.item_name}
               packing={activeRow.packing}
-              selectedCustomerId={customerAccountId || null}
-              selectedCustomerName={selectedCustomer?.account_name || 'Walk-in Cash Customer'}
+              selectedCustomerId={customerAccountId > 0 ? customerAccountId : null}
+              selectedCustomerName={customerAccountId > 0 ? selectedCustomer?.account_name || '' : ''}
               historyData={activeItemHistory}
               loading={historyLoading}
               onClose={() => setShowCompactHistoryPopup(false)}
@@ -5554,8 +5636,8 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               itemCode={activeRow.item_code}
               itemName={activeRow.item_name}
               packing={activeRow.packing}
-              selectedCustomerId={customerAccountId || null}
-              selectedCustomerName={selectedCustomer?.account_name || 'Walk-in Cash Customer'}
+              selectedCustomerId={customerAccountId > 0 ? customerAccountId : null}
+              selectedCustomerName={customerAccountId > 0 ? selectedCustomer?.account_name || '' : ''}
               historyData={activeItemHistory}
               loading={historyLoading}
               onClose={() => setShowCompactHistoryPopup(false)}

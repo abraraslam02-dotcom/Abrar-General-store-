@@ -101,20 +101,33 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
 
   if (!isOpen || !itemCode) return null;
 
-  const rawSales =
-    historyData?.salesHistory && historyData.salesHistory.length > 0
+  const hasSelectedCustomer = Boolean(selectedCustomerId && Number(selectedCustomerId) > 0);
+
+  // In Sales mode, NEVER display another customer's sales or any purchase records.
+  const rawSales: CustomerSaleHistoryEntry[] =
+    mode === 'sales'
+      ? hasSelectedCustomer
+        ? (historyData?.customerSalesHistory || []).filter(
+            (s) => Number(s.customer_account_id) === Number(selectedCustomerId)
+          )
+        : []
+      : historyData?.salesHistory && historyData.salesHistory.length > 0
       ? historyData.salesHistory
       : historyData?.customerSalesHistory || [];
 
   const latestSales = sortSalesLatest10(rawSales);
-  const latestPurchases = sortPurchasesLatest10(historyData?.purchaseHistory);
+  const latestPurchases = mode === 'sales' ? [] : sortPurchasesLatest10(historyData?.purchaseHistory);
 
   // Identify the last sale to the currently selected customer
   const lastCustomerSale: CustomerSaleHistoryEntry | null =
-    historyData?.lastCustomerSale ||
-    (selectedCustomerId && selectedCustomerId > 0
-      ? latestSales.find((s) => Number(s.customer_account_id) === Number(selectedCustomerId)) || null
-      : null);
+    hasSelectedCustomer
+      ? (historyData?.lastCustomerSale &&
+        Number(historyData.lastCustomerSale.customer_account_id) === Number(selectedCustomerId)
+          ? historyData.lastCustomerSale
+          : null) ||
+        latestSales.find((s) => Number(s.customer_account_id) === Number(selectedCustomerId)) ||
+        null
+      : null;
 
   return (
     <div
@@ -131,7 +144,7 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
         <div className="flex items-center gap-1.5 min-w-0">
           <History className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
           <span className="font-bold uppercase tracking-wider text-emerald-300 text-[10px]">
-            Item History
+            {mode === 'sales' ? 'Customer Sales Item History' : 'Item History'}
           </span>
           <span
             data-testid="compact-history-item-code"
@@ -144,6 +157,11 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
           </span>
           {packing && (
             <span className="text-slate-300 font-mono text-[10px]">({packing})</span>
+          )}
+          {mode === 'sales' && hasSelectedCustomer && selectedCustomerName && (
+            <span className="px-1.5 py-0 rounded bg-slate-800 text-amber-300 font-semibold text-[10px] truncate max-w-[200px]">
+              Customer: {selectedCustomerName}
+            </span>
           )}
           {loading && (
             <span className="inline-flex items-center gap-1 text-amber-300 font-mono text-[10px]">
@@ -167,19 +185,21 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
             <ShoppingCart className="w-3 h-3" />
             <span>Sales History ({latestSales.length})</span>
           </button>
-          <button
-            type="button"
-            data-testid="compact-history-tab-purchases"
-            onClick={() => setActiveTab('purchases')}
-            className={`px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-colors ${
-              activeTab === 'purchases'
-                ? 'bg-sky-600 text-white'
-                : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white'
-            }`}
-          >
-            <ShoppingBag className="w-3 h-3" />
-            <span>Purchase History ({latestPurchases.length})</span>
-          </button>
+          {mode !== 'sales' && (
+            <button
+              type="button"
+              data-testid="compact-history-tab-purchases"
+              onClick={() => setActiveTab('purchases')}
+              className={`px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-colors ${
+                activeTab === 'purchases'
+                  ? 'bg-sky-600 text-white'
+                  : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white'
+              }`}
+            >
+              <ShoppingBag className="w-3 h-3" />
+              <span>Purchase History ({latestPurchases.length})</span>
+            </button>
+          )}
           <button
             type="button"
             data-testid="compact-history-close-btn"
@@ -192,7 +212,7 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
         </div>
       </div>
 
-      {/* Requirement 6: In Sales, highlight the last sale to the currently selected customer separately */}
+      {/* Customer-specific Last Sale highlight bar in Sales mode */}
       {mode === 'sales' && (
         <div
           data-testid="compact-history-last-customer-sale"
@@ -225,9 +245,6 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
                   Loose: <strong className="text-slate-900">{Number(lastCustomerSale.loose_quantity || 0)}</strong>
                 </span>
                 <span className="text-slate-600">
-                  Bonus: <strong className="text-slate-900">{Number(lastCustomerSale.bonus_quantity || 0)}</strong>
-                </span>
-                <span className="text-slate-600">
                   Sale Price:{' '}
                   <strong className="text-emerald-800">
                     Rs. {formatNumber(lastCustomerSale.unit_price)}
@@ -237,6 +254,12 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
                   Discount:{' '}
                   <strong className="text-rose-700">
                     {formatDisc(lastCustomerSale.discount_percent, lastCustomerSale.discount_amount)}
+                  </strong>
+                </span>
+                <span className="text-slate-600">
+                  Net Amount:{' '}
+                  <strong className="text-slate-900">
+                    Rs. {formatNumber(lastCustomerSale.line_total)}
                   </strong>
                 </span>
               </div>
@@ -258,23 +281,23 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
           ) : (
             <div className="flex items-center gap-1.5">
               <span className="px-1.5 py-0 rounded bg-slate-200 text-slate-700 font-bold text-[9.5px] uppercase">
-                Last Sale to Selected Customer
+                Customer Sales History
               </span>
-              <span>
-                {selectedCustomerId && selectedCustomerId > 0
-                  ? `No previous completed sale of [${itemCode}] recorded for ${
-                      selectedCustomerName || 'this customer'
-                    }.`
-                  : 'Select a customer account to highlight customer-specific last sale.'}
+              <span className="font-semibold text-slate-700">
+                {!hasSelectedCustomer
+                  ? 'Please select a customer first.'
+                  : loading
+                  ? 'Loading customer sales history...'
+                  : 'No previous sales history for this customer.'}
               </span>
             </div>
           )}
         </div>
       )}
 
-      {/* Compact Table Body (Latest 10 Transactions in Descending Date Order) */}
+      {/* Compact Table Body (Latest Transactions in Descending Date Order) */}
       <div className="max-h-36 overflow-y-auto overflow-x-auto bg-white">
-        {activeTab === 'sales' ? (
+        {mode === 'sales' || activeTab === 'sales' ? (
           <table
             data-testid="compact-history-sales-table"
             className="w-full text-left border-collapse text-[10.5px]"
@@ -283,27 +306,35 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
               <tr>
                 <th className="px-2 py-0.5 border-r border-slate-200">Invoice Date</th>
                 <th className="px-2 py-0.5 border-r border-slate-200">Invoice Number</th>
-                <th className="px-2 py-0.5 border-r border-slate-200">Customer Name</th>
+                <th className="px-2 py-0.5 border-r border-slate-200">Item Name</th>
                 <th className="px-2 py-0.5 border-r border-slate-200 text-right">Quantity</th>
                 <th className="px-2 py-0.5 border-r border-slate-200 text-right">Loose Quantity</th>
-                <th className="px-2 py-0.5 border-r border-slate-200 text-right">Bonus</th>
                 <th className="px-2 py-0.5 border-r border-slate-200 text-right">Sale Price</th>
-                <th className="px-2 py-0.5 text-right">Discount</th>
+                <th className="px-2 py-0.5 border-r border-slate-200 text-right">Discount</th>
+                <th className="px-2 py-0.5 text-right">Net Amount</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 font-mono">
-              {latestSales.length === 0 ? (
+              {mode === 'sales' && !hasSelectedCustomer ? (
+                <tr>
+                  <td colSpan={8} className="px-3 py-2 text-center font-sans text-amber-700 font-semibold">
+                    Please select a customer first.
+                  </td>
+                </tr>
+              ) : latestSales.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="px-3 py-2 text-center font-sans text-slate-500 italic">
                     {loading
                       ? `Loading sales history for Item Code [${itemCode}]...`
+                      : mode === 'sales'
+                      ? 'No previous sales history for this customer.'
                       : `No previous sales transactions found for Item Code [${itemCode}].`}
                   </td>
                 </tr>
               ) : (
                 latestSales.map((s, idx) => {
                   const isSelectedCustRow =
-                    Boolean(selectedCustomerId && selectedCustomerId > 0) &&
+                    hasSelectedCustomer &&
                     Number(s.customer_account_id) === Number(selectedCustomerId);
                   const isLastSaleForSelectedCust =
                     isSelectedCustRow &&
@@ -330,15 +361,8 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
                       <td className="px-2 py-0.5 border-r border-slate-200 font-bold text-emerald-800 whitespace-nowrap">
                         {s.invoice_number}
                       </td>
-                      <td className="px-2 py-0.5 border-r border-slate-200 font-sans truncate max-w-[200px]">
-                        <div className="flex items-center gap-1">
-                          <span className="truncate">{s.customer_name || 'Walk-in Cash Customer'}</span>
-                          {isLastSaleForSelectedCust && (
-                            <span className="px-1 py-0 rounded bg-amber-600 text-white text-[8.5px] font-bold uppercase shrink-0">
-                              Last Customer Sale
-                            </span>
-                          )}
-                        </div>
+                      <td className="px-2 py-0.5 border-r border-slate-200 font-sans truncate max-w-[220px]">
+                        {s.item_name || itemName}
                       </td>
                       <td className="px-2 py-0.5 border-r border-slate-200 text-right font-bold">
                         {Number(s.quantity || 0)}
@@ -346,14 +370,14 @@ export const CompactItemHistoryPopup: React.FC<CompactItemHistoryPopupProps> = (
                       <td className="px-2 py-0.5 border-r border-slate-200 text-right">
                         {Number(s.loose_quantity || 0)}
                       </td>
-                      <td className="px-2 py-0.5 border-r border-slate-200 text-right">
-                        {Number(s.bonus_quantity || 0)}
-                      </td>
                       <td className="px-2 py-0.5 border-r border-slate-200 text-right font-bold text-emerald-800">
                         Rs. {formatNumber(s.unit_price)}
                       </td>
-                      <td className="px-2 py-0.5 text-right text-rose-700 whitespace-nowrap">
+                      <td className="px-2 py-0.5 border-r border-slate-200 text-right text-rose-700 whitespace-nowrap">
                         {formatDisc(s.discount_percent, s.discount_amount)}
+                      </td>
+                      <td className="px-2 py-0.5 text-right font-bold text-slate-900 whitespace-nowrap">
+                        Rs. {formatNumber(s.line_total)}
                       </td>
                     </tr>
                   );
