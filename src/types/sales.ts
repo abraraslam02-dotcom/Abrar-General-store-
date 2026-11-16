@@ -204,11 +204,14 @@ export interface ItemPurchaseHistoryEntry {
   purchase_item_id: number;
   purchase_id: number;
   item_id: number;
+  item_code?: string;
+  item_name?: string;
   batch_number: string;
   manufacturing_date: string;
   expiry_date: string;
   packing: string;
   quantity: number;
+  loose_quantity?: number;
   bonus_quantity: number;
   purchase_price: number;
   trade_price: number;
@@ -221,20 +224,25 @@ export interface ItemPurchaseHistoryEntry {
   line_total: number;
   effective_cost_per_pack: number;
   bill_number: string;
+  invoice_number?: string;
   supplier_invoice_no: string;
   bill_date: string;
+  invoice_date?: string;
   supplier_account_id: number;
   supplier_name: string;
 }
 
 export interface CustomerItemHistoryResponse {
   success: boolean;
+  offline?: boolean;
+  itemCode?: string;
   item: Record<string, any>;
   customerId: number | null;
   hasCustomerHistory: boolean;
   lastCustomerSale: CustomerSaleHistoryEntry | null;
   previousCustomerSaleBeforeLast: CustomerSaleHistoryEntry | null;
   customerSalesHistory: CustomerSaleHistoryEntry[];
+  salesHistory?: CustomerSaleHistoryEntry[];
   lastPurchase: ItemPurchaseHistoryEntry | null;
   purchaseHistory: ItemPurchaseHistoryEntry[];
 }

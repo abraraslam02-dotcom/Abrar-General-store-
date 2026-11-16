@@ -5660,92 +5660,145 @@ export const api = {
   },
 
   /**
-   * Customer-Wise Item Sale History & Item Purchase History
+   * Item Sale History & Item Purchase History fetched by unique ItemCode (with itemId fallback)
    */
-  async getItemCustomerHistory(itemId: number, customerId?: number | null) {
+  async getItemCustomerHistory(
+    itemCodeOrId: string | number,
+    customerId?: number | null,
+    itemCodeOverride?: string
+  ) {
+    const cleanCode = String(itemCodeOverride || itemCodeOrId || '').trim();
+    const numericId = typeof itemCodeOrId === 'number' && itemCodeOrId > 0 ? itemCodeOrId : 0;
+
     const query = new URLSearchParams();
+    if (cleanCode) {
+      query.append('itemCode', cleanCode);
+    }
+    if (numericId > 0) {
+      query.append('itemId', String(numericId));
+    }
     if (customerId && customerId > 0) {
       query.append('customerId', String(customerId));
     }
+
+    const pathKey = encodeURIComponent(cleanCode || String(numericId));
     try {
-      const res = await authFetch(`/api/sales/item-history/${itemId}?${query.toString()}`);
+      const res = await authFetch(`/api/sales/item-history/${pathKey}?${query.toString()}`);
       const data = await res.json();
       if (res.ok && data.success) return data;
     } catch {
       // Offline fallback
     }
+
     const [allSales, allPurchases, allItems, allAccounts] = await Promise.all([
       offlineStorage.getAll<any>('sales').catch(() => []),
       offlineStorage.getAll<any>('purchases').catch(() => []),
       offlineStorage.getAll<any>('items').catch(() => []),
       offlineStorage.getAll<any>('accounts').catch(() => []),
     ]);
-    const item = allItems.find((it) => Number(it.id) === Number(itemId)) || {};
+
+    const cleanCodeLower = cleanCode.toLowerCase();
+    const item =
+      (cleanCodeLower
+        ? allItems.find((it) => String(it.item_code || '').trim().toLowerCase() === cleanCodeLower)
+        : undefined) ||
+      (numericId > 0 ? allItems.find((it) => Number(it.id) === numericId) : undefined) ||
+      {};
+
+    const resolvedItemId = Number(item.id || numericId || 0);
+    const canonicalItemCode = String(item.item_code || cleanCode || '').trim();
+    const canonicalCodeLower = canonicalItemCode.toLowerCase();
     const accMap = new Map<number, any>(allAccounts.map((a) => [Number(a.id), a]));
 
-    const customerSalesHistory: any[] = [];
-    if (customerId && customerId > 0) {
-      for (const s of allSales) {
-        if (String(s.status || 'completed').toLowerCase() !== 'completed') continue;
-        if (Number(s.customer_account_id) !== Number(customerId)) continue;
-        const lines = Array.isArray(s.items) ? s.items : Array.isArray(s.lines) ? s.lines : [];
-        lines.forEach((ln: any, idx: number) => {
-          if (Number(ln.item_id) !== Number(itemId)) return;
-          customerSalesHistory.push({
-            sale_item_id: Number(ln.id || idx + 1),
-            sale_id: Number(s.server_id || s.id || 0),
-            item_id: Number(itemId),
-            item_code: String(ln.item_code || item.item_code || ''),
-            item_name: String(ln.item_name || item.item_name || ''),
-            packing: String(ln.packing || item.packing || ''),
-            batch_number: String(ln.batch_number || ''),
-            expiry_date: String(ln.expiry_date || ''),
-            quantity: Number(ln.quantity || 0),
-            bonus_quantity: Number(ln.bonus_quantity || 0),
-            loose_quantity: Number(ln.loose_quantity || 0),
-            total_units: Number(ln.total_units || 0),
-            unit_price: Number(ln.unit_price || 0),
-            loose_rate: Number(ln.loose_rate || 0),
-            discount_percent: Number(ln.discount_percent || 0),
-            discount_amount: Number(ln.discount_amount || 0),
-            tax_percent: Number(ln.tax_percent || 0),
-            tax_amount: Number(ln.tax_amount || 0),
-            line_total: Number(ln.line_total || 0),
-            invoice_number: String(s.invoice_number || ''),
-            invoice_date: String(s.invoice_date || ''),
-            invoice_type: String(s.invoice_type || 'Retail'),
-            payment_mode: String(s.payment_mode || 'Cash'),
-            customer_account_id: Number(s.customer_account_id || 0),
-            customer_name: String(s.customer_name || accMap.get(Number(s.customer_account_id))?.account_name || ''),
-            buyer_name: String(s.buyer_name || ''),
-            salesman: String(s.salesman || ''),
-          });
-        });
+    const matchesItemLine = (ln: any): boolean => {
+      const lnCode = String(ln?.item_code || '').trim().toLowerCase();
+      if (lnCode && (lnCode === canonicalCodeLower || (cleanCodeLower && lnCode === cleanCodeLower))) {
+        return true;
       }
-      customerSalesHistory.sort((a, b) => {
-        const dCmp = String(b.invoice_date || '').localeCompare(String(a.invoice_date || ''));
-        if (dCmp !== 0) return dCmp;
-        return String(b.invoice_number || '').localeCompare(String(a.invoice_number || ''), undefined, { numeric: true });
+      if (!lnCode && resolvedItemId > 0 && Number(ln?.item_id) === resolvedItemId) {
+        return true;
+      }
+      if (resolvedItemId > 0 && Number(ln?.item_id) === resolvedItemId) {
+        return true;
+      }
+      return false;
+    };
+
+    const allMatchedSales: any[] = [];
+    for (const s of allSales) {
+      if (String(s.status || 'completed').trim().toLowerCase() !== 'completed') continue;
+      const lines = Array.isArray(s.items) ? s.items : Array.isArray(s.lines) ? s.lines : [];
+      const custAcc = accMap.get(Number(s.customer_account_id));
+      lines.forEach((ln: any, idx: number) => {
+        if (!matchesItemLine(ln)) return;
+        allMatchedSales.push({
+          sale_item_id: Number(ln.id || idx + 1),
+          sale_id: Number(s.server_id || s.id || 0),
+          item_id: resolvedItemId || Number(ln.item_id || 0),
+          item_code: String(ln.item_code || canonicalItemCode || ''),
+          item_name: String(ln.item_name || item.item_name || ''),
+          packing: String(ln.packing || item.packing || ''),
+          batch_number: String(ln.batch_number || ''),
+          expiry_date: String(ln.expiry_date || ''),
+          quantity: Number(ln.quantity || 0),
+          bonus_quantity: Number(ln.bonus_quantity || 0),
+          loose_quantity: Number(ln.loose_quantity || 0),
+          total_units: Number(ln.total_units || 0),
+          unit_price: Number(ln.unit_price || 0),
+          loose_rate: Number(ln.loose_rate || 0),
+          discount_percent: Number(ln.discount_percent || 0),
+          discount_amount: Number(ln.discount_amount || 0),
+          tax_percent: Number(ln.tax_percent || 0),
+          tax_amount: Number(ln.tax_amount || 0),
+          line_total: Number(ln.line_total || 0),
+          invoice_number: String(s.invoice_number || ''),
+          invoice_date: String(s.invoice_date || ''),
+          invoice_type: String(s.invoice_type || 'Retail'),
+          payment_mode: String(s.payment_mode || 'Cash'),
+          customer_account_id: Number(s.customer_account_id || 0),
+          customer_name: String(
+            custAcc?.account_name || s.customer_name || 'Walk-in Cash Customer'
+          ),
+          buyer_name: String(s.buyer_name || ''),
+          salesman: String(s.salesman || ''),
+        });
       });
     }
 
-    const purchaseHistory: any[] = [];
+    allMatchedSales.sort((a, b) => {
+      const dCmp = String(b.invoice_date || '').localeCompare(String(a.invoice_date || ''));
+      if (dCmp !== 0) return dCmp;
+      return String(b.invoice_number || '').localeCompare(String(a.invoice_number || ''), undefined, { numeric: true });
+    });
+
+    const salesHistory = allMatchedSales.slice(0, 10);
+    const customerSalesHistory =
+      customerId && customerId > 0
+        ? allMatchedSales.filter((row) => Number(row.customer_account_id) === Number(customerId)).slice(0, 10)
+        : [];
+
+    const allMatchedPurchases: any[] = [];
     for (const p of allPurchases) {
-      if (String(p.status || 'completed').toLowerCase() !== 'completed') continue;
+      if (String(p.status || 'completed').trim().toLowerCase() !== 'completed') continue;
       const lines = Array.isArray(p.items) ? p.items : Array.isArray(p.lines) ? p.lines : [];
       const supAcc = accMap.get(Number(p.supplier_account_id));
       lines.forEach((ln: any, idx: number) => {
-        if (Number(ln.item_id) !== Number(itemId)) return;
+        if (!matchesItemLine(ln)) return;
         const pRate = Number(ln.purchase_rate ?? ln.purchase_price ?? 0);
-        purchaseHistory.push({
+        const billNo = String(p.bill_number || p.invoice_number || '');
+        const billDt = String(p.bill_date || p.invoice_date || '');
+        allMatchedPurchases.push({
           purchase_item_id: Number(ln.id || idx + 1),
           purchase_id: Number(p.server_id || p.id || 0),
-          item_id: Number(itemId),
+          item_id: resolvedItemId || Number(ln.item_id || 0),
+          item_code: String(ln.item_code || canonicalItemCode || ''),
+          item_name: String(ln.item_name || item.item_name || ''),
           batch_number: String(ln.batch_number || ''),
           manufacturing_date: String(ln.manufacturing_date || ''),
           expiry_date: String(ln.expiry_date || ''),
           packing: String(ln.packing || item.packing || ''),
           quantity: Number(ln.quantity || 0),
+          loose_quantity: Number(ln.loose_quantity || 0),
           bonus_quantity: Number(ln.bonus_quantity || 0),
           purchase_price: pRate,
           trade_price: Number(ln.trade_price ?? item.trade_price ?? 0),
@@ -5757,29 +5810,35 @@ export const api = {
           tax_amount: Number(ln.tax_amount || 0),
           line_total: Number(ln.line_total || 0),
           effective_cost_per_pack: pRate,
-          bill_number: String(p.bill_number || p.invoice_number || ''),
+          bill_number: billNo,
+          invoice_number: billNo,
           supplier_invoice_no: String(p.supplier_invoice_number || ''),
-          bill_date: String(p.bill_date || p.invoice_date || ''),
+          bill_date: billDt,
+          invoice_date: billDt,
           supplier_account_id: Number(p.supplier_account_id || 0),
-          supplier_name: String(p.supplier_name || supAcc?.account_name || 'Supplier'),
+          supplier_name: String(supAcc?.account_name || p.supplier_name || 'Supplier'),
         });
       });
     }
-    purchaseHistory.sort((a, b) => {
+    allMatchedPurchases.sort((a, b) => {
       const dCmp = String(b.bill_date || '').localeCompare(String(a.bill_date || ''));
       if (dCmp !== 0) return dCmp;
       return String(b.bill_number || '').localeCompare(String(a.bill_number || ''), undefined, { numeric: true });
     });
 
+    const purchaseHistory = allMatchedPurchases.slice(0, 10);
+
     return {
       success: true,
       offline: true,
+      itemCode: canonicalItemCode,
       item,
       customerId: customerId || null,
       hasCustomerHistory: customerSalesHistory.length > 0,
       lastCustomerSale: customerSalesHistory[0] || null,
       previousCustomerSaleBeforeLast: customerSalesHistory[1] || null,
       customerSalesHistory,
+      salesHistory,
       lastPurchase: purchaseHistory[0] || null,
       purchaseHistory,
     };

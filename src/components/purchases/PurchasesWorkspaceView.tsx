@@ -61,6 +61,8 @@ import { InvoiceSmsModal } from '../common/InvoiceSmsModal';
 import { ItemListSelectionModal } from '../common/ItemListSelectionModal';
 import { DuplicateItemConfirmModal } from '../common/DuplicateItemConfirmModal';
 import { ItemLogModal } from '../common/ItemLogModal';
+import { CompactItemHistoryPopup } from '../common/CompactItemHistoryPopup';
+import { CustomerItemHistoryResponse } from '../../types/sales';
 import {
   InvoiceRecordSearchInput,
   InvoiceSearchableItem,
@@ -516,6 +518,58 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     notes,
     invoiceDiscountPercent,
   ]);
+
+  // Item History Cache & Compact Popup State (Keyed by unique ItemCode)
+  const [purchaseItemHistoryMap, setPurchaseItemHistoryMap] = useState<
+    Record<string, CustomerItemHistoryResponse>
+  >({});
+  const [purchaseHistoryLoading, setPurchaseHistoryLoading] = useState<boolean>(false);
+  const [showPurchaseCompactHistoryPopup, setShowPurchaseCompactHistoryPopup] =
+    useState<boolean>(false);
+
+  const fetchPurchaseItemHistoryByCode = useCallback(
+    async (itemCode: string, itemId?: number) => {
+      const cleanCode = String(itemCode || '').trim();
+      if (!cleanCode && !itemId) return;
+      try {
+        setPurchaseHistoryLoading(true);
+        const res: CustomerItemHistoryResponse = await api.getItemCustomerHistory(
+          itemId || cleanCode,
+          null,
+          cleanCode
+        );
+        const resolvedCode = String(res.itemCode || res.item?.item_code || cleanCode || '')
+          .trim()
+          .toLowerCase();
+        setPurchaseItemHistoryMap((prev) => {
+          const next = { ...prev };
+          if (cleanCode) next[cleanCode.toLowerCase()] = res;
+          if (resolvedCode) next[resolvedCode] = res;
+          if (itemId) next[String(itemId)] = res;
+          return next;
+        });
+      } catch {
+        // ignore
+      } finally {
+        setPurchaseHistoryLoading(false);
+      }
+    },
+    []
+  );
+
+  // Ensure the currently selected purchase row has its Item History loaded by ItemCode
+  useEffect(() => {
+    const activeLine = lines[selectedPurchaseLineIndex];
+    if (activeLine && (activeLine.item_code || activeLine.item_id)) {
+      const codeKey = activeLine.item_code
+        ? activeLine.item_code.trim().toLowerCase()
+        : String(activeLine.item_id);
+      if (!purchaseItemHistoryMap[codeKey]) {
+        fetchPurchaseItemHistoryByCode(activeLine.item_code, Number(activeLine.item_id || 0));
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPurchaseLineIndex]);
 
   // Resilient Master Data & Transactions Loader (Each promise catches individually like Sales!)
   const fetchWorkspaceData = useCallback(async () => {
@@ -1569,6 +1623,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setPurchaseSearchQuery('');
     setShowPurchaseSearchDropdown(false);
     setItemHighlightIndex(0);
+    setShowPurchaseCompactHistoryPopup(true);
+    fetchPurchaseItemHistoryByCode(found.item_code, found.id);
     if (focusQty) {
       requestAnimationFrame(() => {
         setTimeout(() => {
@@ -1640,6 +1696,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setActiveRowItemSearchField(null);
     setShowPurchaseSearchDropdown(false);
     setItemHighlightIndex(0);
+    setShowPurchaseCompactHistoryPopup(true);
+    fetchPurchaseItemHistoryByCode(item.item_code, item.id);
 
     requestAnimationFrame(() => {
       setTimeout(() => {
@@ -2058,6 +2116,8 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
     setActiveRowItemSearchIdx(null);
     setItemHighlightIndex(0);
     setShowPurchaseSearchDropdown(false);
+    setShowPurchaseCompactHistoryPopup(true);
+    fetchPurchaseItemHistoryByCode(it.item_code, it.id);
 
     // Requirement 9: After selecting an item:
     // Add it to the invoice, clear search field, automatically focus search field for next item
@@ -2386,6 +2446,7 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
         setActiveRowItemSearchField(null);
         setRowItemSearchQuery('');
       }
+      setShowPurchaseCompactHistoryPopup(false);
       return;
     }
 
@@ -4208,6 +4269,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                     setActiveRowItemSearchField(null);
                                     setRowItemSearchQuery('');
                                   }
+                                  if (line.item_code || line.item_id) {
+                                    setShowPurchaseCompactHistoryPopup(true);
+                                    fetchPurchaseItemHistoryByCode(
+                                      line.item_code,
+                                      Number(line.item_id || 0)
+                                    );
+                                  }
                                 }}
                                 onDoubleClick={(e) => {
                                   if (!line.item_id) return;
@@ -4611,6 +4679,36 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   </div>
                 </div>
               </div>
+
+              {/* Compact Item History Popup (Purchase POS View) */}
+              {(() => {
+                const activePurchaseLine = lines[selectedPurchaseLineIndex] || lines[0];
+                const codeKey = activePurchaseLine?.item_code
+                  ? activePurchaseLine.item_code.trim().toLowerCase()
+                  : '';
+                const idKey = activePurchaseLine?.item_id
+                  ? String(activePurchaseLine.item_id)
+                  : '';
+                const activePurHistory =
+                  (codeKey && purchaseItemHistoryMap[codeKey]) ||
+                  (idKey && purchaseItemHistoryMap[idKey]) ||
+                  null;
+                return showPurchaseCompactHistoryPopup &&
+                  activePurchaseLine &&
+                  (activePurchaseLine.item_code || activePurchaseLine.item_id) ? (
+                  <CompactItemHistoryPopup
+                    isOpen={showPurchaseCompactHistoryPopup}
+                    mode="purchase"
+                    itemCode={activePurchaseLine.item_code}
+                    itemName={activePurchaseLine.item_name}
+                    packing={activePurchaseLine.packing}
+                    selectedSupplierName={selectedSupplier?.account_name || 'Supplier'}
+                    historyData={activePurHistory}
+                    loading={purchaseHistoryLoading}
+                    onClose={() => setShowPurchaseCompactHistoryPopup(false)}
+                  />
+                ) : null;
+              })()}
 
               {/* SECTION C (BOTTOM): COMPACT PURCHASE POS FOOTER */}
               <div className="ams-pos-compact-chrome w-full bg-slate-900 text-white rounded-md border border-slate-700 px-2.5 py-1.5 shrink-0 space-y-1">
@@ -5341,6 +5439,13 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                                     setActiveRowItemSearchField(null);
                                     setRowItemSearchQuery('');
                                   }
+                                  if (line.item_code || line.item_id) {
+                                    setShowPurchaseCompactHistoryPopup(true);
+                                    fetchPurchaseItemHistoryByCode(
+                                      line.item_code,
+                                      Number(line.item_id || 0)
+                                    );
+                                  }
                                 }}
                                 onDoubleClick={(e) => {
                                   if (!line.item_id) return;
@@ -5750,6 +5855,36 @@ export const PurchasesWorkspaceView: React.FC<PurchasesWorkspaceViewProps> = ({
                   </div>
                 </div>
               </div>
+
+              {/* Compact Item History Popup (Purchase MS Access View) */}
+              {(() => {
+                const activePurchaseLine = lines[selectedPurchaseLineIndex] || lines[0];
+                const codeKey = activePurchaseLine?.item_code
+                  ? activePurchaseLine.item_code.trim().toLowerCase()
+                  : '';
+                const idKey = activePurchaseLine?.item_id
+                  ? String(activePurchaseLine.item_id)
+                  : '';
+                const activePurHistory =
+                  (codeKey && purchaseItemHistoryMap[codeKey]) ||
+                  (idKey && purchaseItemHistoryMap[idKey]) ||
+                  null;
+                return showPurchaseCompactHistoryPopup &&
+                  activePurchaseLine &&
+                  (activePurchaseLine.item_code || activePurchaseLine.item_id) ? (
+                  <CompactItemHistoryPopup
+                    isOpen={showPurchaseCompactHistoryPopup}
+                    mode="purchase"
+                    itemCode={activePurchaseLine.item_code}
+                    itemName={activePurchaseLine.item_name}
+                    packing={activePurchaseLine.packing}
+                    selectedSupplierName={selectedSupplier?.account_name || 'Supplier'}
+                    historyData={activePurHistory}
+                    loading={purchaseHistoryLoading}
+                    onClose={() => setShowPurchaseCompactHistoryPopup(false)}
+                  />
+                ) : null;
+              })()}
 
               {/* SECTION C (BOTTOM): COMPACT MS ACCESS CALCULATION & ACTION FOOTER */}
               <div className="ams-pos-compact-chrome px-2.5 py-1.5 bg-slate-900 text-white border-t border-slate-700 flex flex-col gap-1 shrink-0">

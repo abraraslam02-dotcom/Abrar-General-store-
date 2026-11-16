@@ -189,6 +189,7 @@ async function readVaultDocument(docId: string): Promise<VaultDocFields | null> 
   const response = await fetch(url, {
     method: 'GET',
     headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(6000),
   });
 
   if (response.status === 404) {
@@ -250,6 +251,7 @@ async function writeVaultDocument(doc: VaultDocFields): Promise<boolean> {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(8000),
   });
 
   if (response.status === 429) {
@@ -1527,7 +1529,7 @@ export function hydrateSqliteFromCloudRecords(
         restoredInventory += Number(res.changes || 0);
       }
 
-      // 4. Sales Invoices (non-destructive if missing)
+      // 4. Sales Invoices & Line Items (non-destructive if missing)
       const salesList = Array.isArray(rawInvoices) ? rawInvoices : [];
       for (const s of salesList) {
         const id = Number(s?.server_id || s?.id || 0);
@@ -1537,42 +1539,123 @@ export function hydrateSqliteFromCloudRecords(
 
         const existing = db
           .prepare('SELECT id FROM sales WHERE invoice_number = ? OR (client_request_id IS NOT NULL AND client_request_id = ?)')
-          .get(invNo, String(s?.client_tx_id || s?.client_request_id || ''));
-        if (existing) continue;
+          .get(invNo, String(s?.client_tx_id || s?.client_request_id || '')) as { id: number } | undefined;
 
-        const res = db
-          .prepare(
-            `INSERT OR IGNORE INTO sales (
-              invoice_number, invoice_date, customer_account_id, customer_name, buyer_name,
-              invoice_type, payment_mode, gross_total, discount_amount,
-              taxable_amount, gst_amount, tax_amount, net_total,
-              paid_amount, balance_amount, status, remarks, client_request_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          )
-          .run(
-            invNo,
-            String(s.invoice_date || new Date().toISOString().slice(0, 10)),
-            s.customer_account_id || null,
-            String(s.customer_name || 'Walk-in Cash Customer'),
-            String(s.buyer_name || ''),
-            String(s.invoice_type || 'Cash'),
-            String(s.payment_mode || 'Cash'),
-            Number(s.gross_total || s.net_total || 0),
-            Number(s.discount_amount || 0),
-            Number(s.taxable_amount || s.net_total || 0),
-            Number(s.gst_amount || 0),
-            Number(s.tax_amount || 0),
-            Number(s.net_total || 0),
-            Number(s.paid_amount || 0),
-            Number(s.balance_amount || 0),
-            String(s.status || 'Completed'),
-            s.remarks || null,
-            s.client_tx_id || s.client_request_id || null
+        let targetSaleId = existing ? Number(existing.id) : 0;
+
+        if (!existing) {
+          const normalizedSaleStatus = String(s.status || 'completed').trim().toLowerCase() || 'completed';
+          const res = db
+            .prepare(
+              `INSERT OR IGNORE INTO sales (
+                invoice_number, invoice_date, customer_account_id, customer_name, buyer_name,
+                invoice_type, payment_mode, gross_total, discount_amount,
+                taxable_amount, gst_amount, tax_amount, net_total,
+                paid_amount, balance_amount, status, remarks, client_request_id
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            )
+            .run(
+              invNo,
+              String(s.invoice_date || new Date().toISOString().slice(0, 10)),
+              s.customer_account_id || null,
+              String(s.customer_name || 'Walk-in Cash Customer'),
+              String(s.buyer_name || ''),
+              String(s.invoice_type || 'Retail'),
+              String(s.payment_mode || 'Cash'),
+              Number(s.gross_total || s.net_total || 0),
+              Number(s.discount_amount || 0),
+              Number(s.taxable_amount || s.net_total || 0),
+              Number(s.gst_amount || 0),
+              Number(s.tax_amount || 0),
+              Number(s.net_total || 0),
+              Number(s.paid_amount || 0),
+              Number(s.balance_amount || 0),
+              normalizedSaleStatus,
+              s.remarks || null,
+              s.client_tx_id || s.client_request_id || null
+            );
+          restoredInvoices += Number(res.changes || 0);
+          targetSaleId = Number(res.lastInsertRowid || 0);
+        }
+
+        if (targetSaleId > 0) {
+          const existingLineCount = Number(
+            (db.prepare('SELECT COUNT(*) as c FROM sale_items WHERE sale_id = ?').get(targetSaleId) as { c: number } | undefined)?.c || 0
           );
-        restoredInvoices += Number(res.changes || 0);
+          const sLines = Array.isArray(s?.items) ? s.items : Array.isArray(s?.lines) ? s.lines : [];
+          if (existingLineCount === 0 && sLines.length > 0) {
+            for (const ln of sLines) {
+              const rawCode = String(ln?.item_code || '').trim();
+              let resolvedItem: Record<string, any> | undefined;
+              if (rawCode) {
+                resolvedItem = db
+                  .prepare('SELECT id, item_code, item_name, company_name, packing FROM items WHERE LOWER(TRIM(item_code)) = LOWER(TRIM(?)) LIMIT 1')
+                  .get(rawCode) as Record<string, any> | undefined;
+              }
+              if (!resolvedItem && Number(ln?.item_id || 0) > 0) {
+                resolvedItem = db
+                  .prepare('SELECT id, item_code, item_name, company_name, packing FROM items WHERE id = ? LIMIT 1')
+                  .get(Number(ln.item_id)) as Record<string, any> | undefined;
+              }
+              const itemId = Number(resolvedItem?.id || ln?.item_id || 0);
+              if (itemId <= 0) continue;
+
+              const itemCode = String(resolvedItem?.item_code || rawCode || '').trim();
+              const itemName = String(ln?.item_name || resolvedItem?.item_name || 'Medicine Item').trim();
+              const companyName = String(ln?.company_name || resolvedItem?.company_name || '').trim();
+              const packing = String(ln?.packing || resolvedItem?.packing || '1x1').trim();
+              const qty = Number(ln?.quantity || 0);
+              const looseQty = Number(ln?.loose_quantity || 0);
+              const bonusQty = Number(ln?.bonus_quantity || 0);
+              const unitPrice = Number(ln?.unit_price || 0);
+              const looseRate = Number(ln?.loose_rate || 0);
+              const discPct = Number(ln?.discount_percent || 0);
+              const discAmt = Number(ln?.discount_amount || 0);
+              const grossAmt = Number(ln?.gross_amount || qty * unitPrice + looseQty * looseRate || 0);
+              const taxableAmt = Number(ln?.taxable_amount || Math.max(0, grossAmt - discAmt) || 0);
+              const taxPct = Number(ln?.tax_percent || 0);
+              const taxAmt = Number(ln?.tax_amount || 0);
+              const lineTotal = Number(ln?.line_total || taxableAmt + taxAmt || 0);
+
+              db.prepare(
+                `INSERT INTO sale_items (
+                  sale_id, item_id, inventory_id, item_code, company_name, item_name,
+                  packing, units_per_pack, batch_number, expiry_date,
+                  quantity, loose_quantity, bonus_quantity, total_units,
+                  unit_price, loose_rate, discount_percent, discount_amount,
+                  gross_amount, taxable_amount, tax_percent, tax_amount, line_total
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+              ).run(
+                targetSaleId,
+                itemId,
+                ln?.inventory_id ? Number(ln.inventory_id) : null,
+                itemCode,
+                companyName,
+                itemName,
+                packing,
+                Math.max(1, Number(ln?.units_per_pack || 1)),
+                String(ln?.batch_number || `B-${itemCode}-01`),
+                String(ln?.expiry_date || '2028-12-31'),
+                qty,
+                looseQty,
+                bonusQty,
+                Number(ln?.total_units || qty + looseQty + bonusQty),
+                unitPrice,
+                looseRate,
+                discPct,
+                discAmt,
+                grossAmt,
+                taxableAmt,
+                taxPct,
+                taxAmt,
+                lineTotal
+              );
+            }
+          }
+        }
       }
 
-      // 5. Purchases (non-destructive if missing)
+      // 5. Purchases & Line Items (non-destructive if missing)
       const purchaseList = Array.isArray(extra?.purchases) ? extra!.purchases : [];
       for (const p of purchaseList) {
         const id = Number(p?.server_id || p?.id || 0);
@@ -1582,36 +1665,119 @@ export function hydrateSqliteFromCloudRecords(
 
         const existing = db
           .prepare('SELECT id FROM purchases WHERE bill_number = ? OR (client_request_id IS NOT NULL AND client_request_id = ?)')
-          .get(billNo, String(p?.client_tx_id || p?.client_request_id || ''));
-        if (existing) continue;
+          .get(billNo, String(p?.client_tx_id || p?.client_request_id || '')) as { id: number } | undefined;
 
-        const res = db
-          .prepare(
-            `INSERT OR IGNORE INTO purchases (
-              bill_number, supplier_invoice_number, bill_date, supplier_account_id,
-              gross_total, discount_amount, taxable_amount, gst_amount, tax_amount,
-              net_total, paid_amount, remaining_balance, payment_mode, status, remarks, client_request_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          )
-          .run(
-            billNo,
-            p.supplier_invoice_number || null,
-            String(p.bill_date || new Date().toISOString().slice(0, 10)),
-            p.supplier_account_id || 1,
-            Number(p.gross_total || p.net_total || 0),
-            Number(p.discount_amount || 0),
-            Number(p.taxable_amount || p.net_total || 0),
-            Number(p.gst_amount || 0),
-            Number(p.tax_amount || 0),
-            Number(p.net_total || 0),
-            Number(p.paid_amount || 0),
-            Number(p.remaining_balance || 0),
-            String(p.payment_mode || 'Cash'),
-            String(p.status || 'Completed'),
-            p.remarks || null,
-            p.client_tx_id || p.client_request_id || null
+        let targetPurchaseId = existing ? Number(existing.id) : 0;
+
+        if (!existing) {
+          const normalizedPurStatus = String(p.status || 'completed').trim().toLowerCase() || 'completed';
+          const res = db
+            .prepare(
+              `INSERT OR IGNORE INTO purchases (
+                bill_number, supplier_invoice_number, bill_date, supplier_account_id,
+                gross_total, discount_amount, taxable_amount, gst_amount, tax_amount,
+                net_total, paid_amount, remaining_balance, payment_mode, status, remarks, client_request_id
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            )
+            .run(
+              billNo,
+              p.supplier_invoice_number || null,
+              String(p.bill_date || new Date().toISOString().slice(0, 10)),
+              p.supplier_account_id || 1,
+              Number(p.gross_total || p.net_total || 0),
+              Number(p.discount_amount || 0),
+              Number(p.taxable_amount || p.net_total || 0),
+              Number(p.gst_amount || 0),
+              Number(p.tax_amount || 0),
+              Number(p.net_total || 0),
+              Number(p.paid_amount || 0),
+              Number(p.remaining_balance || 0),
+              String(p.payment_mode || 'Cash'),
+              normalizedPurStatus,
+              p.remarks || null,
+              p.client_tx_id || p.client_request_id || null
+            );
+          restoredPurchases += Number(res.changes || 0);
+          targetPurchaseId = Number(res.lastInsertRowid || 0);
+        }
+
+        if (targetPurchaseId > 0) {
+          const existingLineCount = Number(
+            (db.prepare('SELECT COUNT(*) as c FROM purchase_items WHERE purchase_id = ?').get(targetPurchaseId) as { c: number } | undefined)?.c || 0
           );
-        restoredPurchases += Number(res.changes || 0);
+          const pLines = Array.isArray(p?.items) ? p.items : Array.isArray(p?.lines) ? p.lines : [];
+          if (existingLineCount === 0 && pLines.length > 0) {
+            for (const ln of pLines) {
+              const rawCode = String(ln?.item_code || '').trim();
+              let resolvedItem: Record<string, any> | undefined;
+              if (rawCode) {
+                resolvedItem = db
+                  .prepare('SELECT id, item_code, item_name, company_name, packing, retail_price FROM items WHERE LOWER(TRIM(item_code)) = LOWER(TRIM(?)) LIMIT 1')
+                  .get(rawCode) as Record<string, any> | undefined;
+              }
+              if (!resolvedItem && Number(ln?.item_id || 0) > 0) {
+                resolvedItem = db
+                  .prepare('SELECT id, item_code, item_name, company_name, packing, retail_price FROM items WHERE id = ? LIMIT 1')
+                  .get(Number(ln.item_id)) as Record<string, any> | undefined;
+              }
+              const itemId = Number(resolvedItem?.id || ln?.item_id || 0);
+              if (itemId <= 0) continue;
+
+              const itemCode = String(resolvedItem?.item_code || rawCode || '').trim();
+              const itemName = String(ln?.item_name || resolvedItem?.item_name || 'Medicine Item').trim();
+              const companyName = String(ln?.company_name || resolvedItem?.company_name || '').trim();
+              const packing = String(ln?.packing || resolvedItem?.packing || '1x1').trim();
+              const qty = Number(ln?.quantity || 0);
+              const bonusQty = Number(ln?.bonus_quantity || 0);
+              const looseQty = Number(ln?.loose_quantity || 0);
+              const purchaseRate = Number(ln?.purchase_rate ?? ln?.purchase_price ?? 0);
+              const mrpRate = Number(ln?.mrp_rate ?? ln?.retail_price ?? resolvedItem?.retail_price ?? 0);
+              const discPct = Number(ln?.discount_percent || 0);
+              const discAmt = Number(ln?.discount_amount || 0);
+              const grossAmt = Number(ln?.gross_amount || qty * purchaseRate || 0);
+              const taxableAmt = Number(ln?.taxable_amount || Math.max(0, grossAmt - discAmt) || 0);
+              const taxPct = Number(ln?.tax_percent || 0);
+              const taxAmt = Number(ln?.tax_amount || 0);
+              const lineTotal = Number(ln?.line_total || taxableAmt + taxAmt || 0);
+
+              db.prepare(
+                `INSERT INTO purchase_items (
+                  purchase_id, item_id, inventory_id, item_code, company_name, item_name,
+                  packing, units_per_pack, batch_number, manufacturing_date, expiry_date,
+                  quantity, bonus_quantity, pack_quantity, loose_quantity, total_units,
+                  purchase_rate, mrp_rate, gross_amount, discount_percent, discount_amount,
+                  taxable_amount, tax_percent, tax_amount, line_total
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+              ).run(
+                targetPurchaseId,
+                itemId,
+                ln?.inventory_id ? Number(ln.inventory_id) : null,
+                itemCode,
+                companyName,
+                itemName,
+                packing,
+                Math.max(1, Number(ln?.units_per_pack || 1)),
+                String(ln?.batch_number || `B-${itemCode}-01`),
+                ln?.manufacturing_date ? String(ln.manufacturing_date) : null,
+                String(ln?.expiry_date || '2028-12-31'),
+                qty,
+                bonusQty,
+                qty + bonusQty,
+                looseQty,
+                Number(ln?.total_units || qty + bonusQty + looseQty),
+                purchaseRate,
+                mrpRate,
+                grossAmt,
+                discPct,
+                discAmt,
+                taxableAmt,
+                taxPct,
+                taxAmt,
+                lineTotal
+              );
+            }
+          }
+        }
       }
 
       // 6. Cash Book Vouchers (non-destructive if missing)

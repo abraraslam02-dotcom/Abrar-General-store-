@@ -685,88 +685,170 @@ salesRouter.get('/', (req: Request, res: Response) => {
 
 /**
  * GET /api/sales/item-history/:itemId
- * Retrieves:
- * 1) Customer-specific previous sale history for this item (only confirmed 'completed' sales to the selected customer)
- * 2) Last Purchase Cost & Purchase History for this item (from confirmed 'completed' purchases)
+ * Retrieves Item History using the selected item's unique ItemCode (with itemId fallback):
+ * 1) Latest 10 Sales Transactions (salesHistory) across all customers in descending date order
+ * 2) Customer-specific previous sale history & Last Sale to currently selected customer (lastCustomerSale, customerSalesHistory)
+ * 3) Latest 10 Purchase Transactions (purchaseHistory) & Last Purchase Cost in descending date order
  */
-salesRouter.get('/item-history/:itemId', (req: Request, res: Response) => {
+const handleGetItemHistory = (req: Request, res: Response) => {
   try {
     const db = getDatabase();
-    const itemId = Number(req.params.itemId || 0);
+    const rawParam = String(req.params.itemId || '').trim();
+    const rawQueryCode = String(req.query.itemCode || '').trim();
+    const rawQueryItemId = Number(req.query.itemId || 0);
     const customerId = Number(req.query.customerId || 0);
 
-    if (!itemId) {
-      return res.status(400).json({ success: false, error: 'Valid itemId is required.' });
+    const lookupCode = rawQueryCode || rawParam;
+    if (!lookupCode && !rawQueryItemId) {
+      return res.status(400).json({ success: false, error: 'Valid itemCode is required.' });
     }
 
-    const itemRow = db
-      .prepare('SELECT id, item_code, item_name, company_name, packing, purchase_price, trade_price, wholesale_price, retail_price, tax_percent FROM items WHERE id = ?')
-      .get(itemId) as Record<string, unknown> | undefined;
+    const itemSelectCols =
+      'id, item_code, item_name, company_name, packing, purchase_price, trade_price, wholesale_price, retail_price, tax_percent';
+
+    // 1. Primary lookup by unique ItemCode (case-insensitive)
+    let itemRow: Record<string, unknown> | undefined;
+    if (lookupCode) {
+      itemRow = db
+        .prepare(`SELECT ${itemSelectCols} FROM items WHERE LOWER(TRIM(item_code)) = LOWER(TRIM(?)) LIMIT 1`)
+        .get(lookupCode) as Record<string, unknown> | undefined;
+
+      // Check item_code_history if code was previously reassigned
+      if (!itemRow) {
+        try {
+          const histMatch = db
+            .prepare('SELECT item_id FROM item_code_history WHERE LOWER(TRIM(item_code)) = LOWER(TRIM(?)) AND item_id IS NOT NULL LIMIT 1')
+            .get(lookupCode) as { item_id: number } | undefined;
+          if (histMatch?.item_id) {
+            itemRow = db
+              .prepare(`SELECT ${itemSelectCols} FROM items WHERE id = ? LIMIT 1`)
+              .get(Number(histMatch.item_id)) as Record<string, unknown> | undefined;
+          }
+        } catch {
+          // ignore if item_code_history table not yet created
+        }
+      }
+    }
+
+    // 2. Fallback lookup by numeric item.id if itemCode was passed as id
+    const fallbackNumericId = rawQueryItemId > 0 ? rawQueryItemId : /^\d+$/.test(rawParam) ? Number(rawParam) : 0;
+    if (!itemRow && fallbackNumericId > 0) {
+      itemRow = db
+        .prepare(`SELECT ${itemSelectCols} FROM items WHERE id = ? LIMIT 1`)
+        .get(fallbackNumericId) as Record<string, unknown> | undefined;
+    }
 
     if (!itemRow) {
-      return res.status(404).json({ success: false, error: 'Item not found.' });
+      return res.status(404).json({ success: false, error: 'Item not found for the specified ItemCode.' });
     }
 
-    // 1. Customer-Specific Confirmed Sales History (strictly filtered by customer_account_id and s.status = 'completed')
+    const resolvedItemId = Number(itemRow.id);
+    const canonicalItemCode = String(itemRow.item_code || lookupCode).trim();
+
+    // Collect all unique item_code values for this item (current item_code + any historical codes linked to item_id)
+    const codeSet = new Set<string>();
+    if (canonicalItemCode) codeSet.add(canonicalItemCode.toLowerCase());
+    if (lookupCode) codeSet.add(lookupCode.toLowerCase());
+    try {
+      const histCodes = db
+        .prepare('SELECT item_code FROM item_code_history WHERE item_id = ?')
+        .all(resolvedItemId) as Array<{ item_code: string }>;
+      for (const hc of histCodes) {
+        const c = String(hc?.item_code || '').trim().toLowerCase();
+        if (c) codeSet.add(c);
+      }
+    } catch {
+      // ignore
+    }
+
+    const codeList = Array.from(codeSet);
+    const codePlaceholders = codeList.length > 0 ? codeList.map(() => '?').join(',') : "''";
+
+    const saleSelectSql = `
+      SELECT
+        si.id as sale_item_id,
+        si.sale_id,
+        COALESCE(si.item_id, i.id, ?) as item_id,
+        COALESCE(NULLIF(TRIM(i.item_code), ''), NULLIF(TRIM(si.item_code), ''), ?) as item_code,
+        COALESCE(NULLIF(TRIM(i.item_name), ''), NULLIF(TRIM(si.item_name), ''), '') as item_name,
+        COALESCE(si.packing, i.packing, '') as packing,
+        COALESCE(si.batch_number, '') as batch_number,
+        COALESCE(si.expiry_date, '') as expiry_date,
+        COALESCE(si.quantity, 0) as quantity,
+        COALESCE(si.bonus_quantity, 0) as bonus_quantity,
+        COALESCE(si.loose_quantity, 0) as loose_quantity,
+        COALESCE(si.total_units, 0) as total_units,
+        COALESCE(si.unit_price, 0) as unit_price,
+        COALESCE(si.loose_rate, 0) as loose_rate,
+        COALESCE(si.discount_percent, 0) as discount_percent,
+        COALESCE(si.discount_amount, 0) as discount_amount,
+        COALESCE(si.tax_percent, 0) as tax_percent,
+        COALESCE(si.tax_amount, 0) as tax_amount,
+        COALESCE(si.line_total, 0) as line_total,
+        s.invoice_number,
+        s.invoice_date,
+        COALESCE(s.invoice_type, 'Retail') as invoice_type,
+        COALESCE(s.payment_mode, 'Cash') as payment_mode,
+        COALESCE(s.customer_account_id, 0) as customer_account_id,
+        COALESCE(NULLIF(TRIM(a.account_name), ''), NULLIF(TRIM(s.customer_name), ''), 'Walk-in Cash Customer') as customer_name,
+        COALESCE(s.buyer_name, '') as buyer_name,
+        COALESCE(s.salesman, '') as salesman
+      FROM sale_items si
+      INNER JOIN sales s ON s.id = si.sale_id
+      LEFT JOIN items i ON i.id = si.item_id
+      LEFT JOIN accounts a ON a.id = s.customer_account_id
+    `;
+
+    // 1. Latest 10 Sales Transactions across all customers (sorted by Invoice Date DESC, then Invoice Number DESC)
+    const salesHistory = db
+      .prepare(`
+        ${saleSelectSql}
+        WHERE (
+          LOWER(TRIM(COALESCE(NULLIF(TRIM(si.item_code), ''), i.item_code, ''))) IN (${codePlaceholders})
+          OR si.item_id = ?
+        )
+          AND LOWER(COALESCE(s.status, 'completed')) = 'completed'
+        ORDER BY DATE(s.invoice_date) DESC, s.invoice_date DESC, s.invoice_number DESC, s.id DESC, si.id DESC
+        LIMIT 10
+      `)
+      .all(resolvedItemId, canonicalItemCode, ...codeList, resolvedItemId) as Array<Record<string, unknown>>;
+
+    // 2. Customer-Specific Confirmed Sales History (for highlighting last sale to currently selected customer)
     let customerSalesHistory: Array<Record<string, unknown>> = [];
     if (customerId > 0) {
       customerSalesHistory = db
         .prepare(`
-          SELECT
-            si.id as sale_item_id,
-            si.sale_id,
-            si.item_id,
-            COALESCE(NULLIF(TRIM(si.item_code), ''), i.item_code, '') as item_code,
-            COALESCE(NULLIF(TRIM(si.item_name), ''), i.item_name, '') as item_name,
-            si.packing,
-            si.batch_number,
-            si.expiry_date,
-            COALESCE(si.quantity, 0) as quantity,
-            COALESCE(si.bonus_quantity, 0) as bonus_quantity,
-            COALESCE(si.loose_quantity, 0) as loose_quantity,
-            COALESCE(si.total_units, 0) as total_units,
-            COALESCE(si.unit_price, 0) as unit_price,
-            COALESCE(si.loose_rate, 0) as loose_rate,
-            COALESCE(si.discount_percent, 0) as discount_percent,
-            COALESCE(si.discount_amount, 0) as discount_amount,
-            COALESCE(si.tax_percent, 0) as tax_percent,
-            COALESCE(si.tax_amount, 0) as tax_amount,
-            COALESCE(si.line_total, 0) as line_total,
-            s.invoice_number,
-            s.invoice_date,
-            s.invoice_type,
-            s.payment_mode,
-            s.customer_account_id,
-            COALESCE(NULLIF(TRIM(s.customer_name), ''), a.account_name, '') as customer_name,
-            COALESCE(s.buyer_name, '') as buyer_name,
-            COALESCE(s.salesman, '') as salesman
-          FROM sale_items si
-          INNER JOIN sales s ON s.id = si.sale_id
-          LEFT JOIN items i ON i.id = si.item_id
-          LEFT JOIN accounts a ON a.id = s.customer_account_id
-          WHERE si.item_id = ?
+          ${saleSelectSql}
+          WHERE (
+            LOWER(TRIM(COALESCE(NULLIF(TRIM(si.item_code), ''), i.item_code, ''))) IN (${codePlaceholders})
+            OR si.item_id = ?
+          )
             AND s.customer_account_id = ?
-            AND s.status = 'completed'
-          ORDER BY s.invoice_date DESC, s.invoice_number DESC, s.id DESC, si.id DESC
+            AND LOWER(COALESCE(s.status, 'completed')) = 'completed'
+          ORDER BY DATE(s.invoice_date) DESC, s.invoice_date DESC, s.invoice_number DESC, s.id DESC, si.id DESC
+          LIMIT 10
         `)
-        .all(itemId, customerId) as Array<Record<string, unknown>>;
+        .all(resolvedItemId, canonicalItemCode, ...codeList, resolvedItemId, customerId) as Array<Record<string, unknown>>;
     }
 
     const lastCustomerSale = customerSalesHistory.length > 0 ? customerSalesHistory[0] : null;
     const previousCustomerSaleBeforeLast = customerSalesHistory.length > 1 ? customerSalesHistory[1] : null;
 
-    // 2. Confirmed Purchase History for this Item (strictly p.status = 'completed')
+    // 3. Latest 10 Confirmed Purchase Transactions for this ItemCode (sorted by Invoice Date DESC, then Invoice Number DESC)
     const purchaseHistory = db
       .prepare(`
         SELECT
           pi.id as purchase_item_id,
           pi.purchase_id,
-          pi.item_id,
+          COALESCE(pi.item_id, it.id, ?) as item_id,
+          COALESCE(NULLIF(TRIM(it.item_code), ''), NULLIF(TRIM(pi.item_code), ''), ?) as item_code,
+          COALESCE(NULLIF(TRIM(it.item_name), ''), NULLIF(TRIM(pi.item_name), ''), '') as item_name,
           COALESCE(pi.batch_number, '') as batch_number,
           COALESCE(pi.manufacturing_date, '') as manufacturing_date,
           COALESCE(pi.expiry_date, '') as expiry_date,
           COALESCE(pi.packing, it.packing, '') as packing,
           COALESCE(pi.quantity, 0) as quantity,
+          COALESCE(pi.loose_quantity, 0) as loose_quantity,
           COALESCE(pi.bonus_quantity, 0) as bonus_quantity,
           COALESCE(pi.purchase_rate, 0) as purchase_price,
           COALESCE(NULLIF(inv.trade_price, 0), it.trade_price, 0) as trade_price,
@@ -783,31 +865,39 @@ salesRouter.get('/item-history/:itemId', (req: Request, res: Response) => {
             ELSE COALESCE(pi.purchase_rate, 0)
           END as effective_cost_per_pack,
           p.bill_number,
+          p.bill_number as invoice_number,
           COALESCE(p.supplier_invoice_number, '') as supplier_invoice_no,
           p.bill_date,
+          p.bill_date as invoice_date,
           p.supplier_account_id,
-          COALESCE(a.account_name, 'Supplier') as supplier_name
+          COALESCE(NULLIF(TRIM(a.account_name), ''), 'Supplier') as supplier_name
         FROM purchase_items pi
         INNER JOIN purchases p ON p.id = pi.purchase_id
         LEFT JOIN accounts a ON a.id = p.supplier_account_id
         LEFT JOIN items it ON it.id = pi.item_id
         LEFT JOIN inventory inv ON inv.id = pi.inventory_id
-        WHERE pi.item_id = ?
-          AND p.status = 'completed'
-        ORDER BY p.bill_date DESC, p.bill_number DESC, p.id DESC, pi.id DESC
+        WHERE (
+          LOWER(TRIM(COALESCE(NULLIF(TRIM(pi.item_code), ''), it.item_code, ''))) IN (${codePlaceholders})
+          OR pi.item_id = ?
+        )
+          AND LOWER(COALESCE(p.status, 'completed')) = 'completed'
+        ORDER BY DATE(p.bill_date) DESC, p.bill_date DESC, p.bill_number DESC, p.id DESC, pi.id DESC
+        LIMIT 10
       `)
-      .all(itemId) as Array<Record<string, unknown>>;
+      .all(resolvedItemId, canonicalItemCode, ...codeList, resolvedItemId) as Array<Record<string, unknown>>;
 
     const lastPurchase = purchaseHistory.length > 0 ? purchaseHistory[0] : null;
 
     return res.json({
       success: true,
+      itemCode: canonicalItemCode,
       item: itemRow,
       customerId: customerId || null,
       hasCustomerHistory: customerSalesHistory.length > 0,
       lastCustomerSale,
       previousCustomerSaleBeforeLast,
       customerSalesHistory,
+      salesHistory,
       lastPurchase,
       purchaseHistory,
     });
@@ -815,7 +905,10 @@ salesRouter.get('/item-history/:itemId', (req: Request, res: Response) => {
     const msg = err instanceof Error ? err.message : String(err);
     return res.status(500).json({ success: false, error: msg });
   }
-});
+};
+
+salesRouter.get('/item-history', handleGetItemHistory);
+salesRouter.get('/item-history/:itemId', handleGetItemHistory);
 
 /**
  * GET /api/sales/price-history/:itemId?customerId=...

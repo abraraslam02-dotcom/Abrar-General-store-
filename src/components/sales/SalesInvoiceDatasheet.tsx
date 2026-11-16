@@ -21,6 +21,7 @@ import { ItemListSelectionModal } from '../common/ItemListSelectionModal';
 import { DuplicateItemConfirmModal } from '../common/DuplicateItemConfirmModal';
 import { SalesPriceHistoryModal } from './SalesPriceHistoryModal';
 import { ItemLogModal } from '../common/ItemLogModal';
+import { CompactItemHistoryPopup } from '../common/CompactItemHistoryPopup';
 import {
   InvoiceRecordSearchInput,
   InvoiceSearchableItem,
@@ -131,37 +132,7 @@ export function createEmptyRow(): DatasheetRow {
   };
 }
 
-// Customer sales history: most recent sale first (latest date on top, then latest entry)
-function sortSalesHistoryRecentFirst<T extends { invoice_date?: unknown; sale_item_id?: unknown }>(
-  list?: T[] | null
-): T[] {
-  return [...(list || [])].sort((a, b) => {
-    const da = Date.parse(String(a.invoice_date || ''));
-    const db = Date.parse(String(b.invoice_date || ''));
-    if (Number.isFinite(da) && Number.isFinite(db) && da !== db) return db - da;
-    if (!(Number.isFinite(da) && Number.isFinite(db))) {
-      const c = String(b.invoice_date || '').localeCompare(String(a.invoice_date || ''));
-      if (c !== 0) return c;
-    }
-    return Number(b.sale_item_id || 0) - Number(a.sale_item_id || 0);
-  });
-}
 
-// Store purchase history: most recent purchase first (latest bill date on top, then latest entry)
-function sortPurchaseHistoryRecentFirst<T extends { bill_date?: unknown; purchase_item_id?: unknown }>(
-  list?: T[] | null
-): T[] {
-  return [...(list || [])].sort((a, b) => {
-    const da = Date.parse(String(a.bill_date || ''));
-    const db = Date.parse(String(b.bill_date || ''));
-    if (Number.isFinite(da) && Number.isFinite(db) && da !== db) return db - da;
-    if (!(Number.isFinite(da) && Number.isFinite(db))) {
-      const c = String(b.bill_date || '').localeCompare(String(a.bill_date || ''));
-      if (c !== 0) return c;
-    }
-    return Number(b.purchase_item_id || 0) - Number(a.purchase_item_id || 0);
-  });
-}
 
 export const MIN_DATASHEET_ROWS = 15;
 
@@ -362,11 +333,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     setRecordJumpInput(String(selectedRowIndex + 1));
   }, [selectedRowIndex]);
 
-  // Customer-Wise Item History & Purchase Cost Cache
+  // Customer-Wise Item History & Purchase Cost Cache (Keyed by ItemCode + CustomerId)
   const [itemHistoryMap, setItemHistoryMap] = useState<Record<string, CustomerItemHistoryResponse>>({});
   const [historyLoading, setHistoryLoading] = useState<boolean>(false);
-  const [historyTab, setHistoryTab] = useState<'customer_sales' | 'item_purchases'>('customer_sales');
-  const [showHistoryTable, setShowHistoryTable] = useState<boolean>(false);
+  const [showCompactHistoryPopup, setShowCompactHistoryPopup] = useState<boolean>(false);
 
   // Live Customer Balance Summary (from actual ledger + Last Payment Date/Amount)
   const [liveBalanceSummary, setLiveBalanceSummary] = useState<{
@@ -670,21 +640,35 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     }
   }, [customerAccountId, editingSaleId, refreshCustomerBalanceSummary]);
 
-  // Fetch Customer-Specific Item Sale History & Last Purchase Cost
+  // Fetch Item Sale History & Purchase History by unique ItemCode
   const fetchAndApplyItemHistory = useCallback(
     async (
       rowIndex: number,
       itemId: number,
       custId: number,
       _currentInvType: SalesInvoiceType,
-      applySuggestedOffers: boolean = true
+      applySuggestedOffers: boolean = true,
+      itemCodeOverride?: string
     ) => {
-      if (!itemId) return;
-      const cacheKey = `${itemId}_${custId || 0}`;
+      const cleanItemCode = String(itemCodeOverride || '').trim();
+      if (!cleanItemCode && !itemId) return;
+      const codeKey = cleanItemCode ? `${cleanItemCode.toLowerCase()}_${custId || 0}` : '';
+      const idKey = itemId ? `${itemId}_${custId || 0}` : '';
       try {
         setHistoryLoading(true);
-        const res: CustomerItemHistoryResponse = await api.getItemCustomerHistory(itemId, custId);
-        setItemHistoryMap((prev) => ({ ...prev, [cacheKey]: res }));
+        const res: CustomerItemHistoryResponse = await api.getItemCustomerHistory(
+          itemId || cleanItemCode,
+          custId,
+          cleanItemCode
+        );
+        const resolvedCode = String(res.itemCode || res.item?.item_code || cleanItemCode || '').trim().toLowerCase();
+        setItemHistoryMap((prev) => {
+          const next = { ...prev };
+          if (codeKey) next[codeKey] = res;
+          if (resolvedCode) next[`${resolvedCode}_${custId || 0}`] = res;
+          if (idKey) next[idKey] = res;
+          return next;
+        });
 
         const lastSale = res.lastCustomerSale;
         const prevBeforeLast = res.previousCustomerSaleBeforeLast;
@@ -693,7 +677,15 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         setRows((prev) => {
           const next = [...prev];
           const target = next[rowIndex];
-          if (!target || target.item_id !== itemId) return prev;
+          if (
+            !target ||
+            (cleanItemCode
+              ? String(target.item_code || '').trim().toLowerCase() !== cleanItemCode.toLowerCase() &&
+                target.item_id !== itemId
+              : target.item_id !== itemId)
+          ) {
+            return prev;
+          }
 
           const updatedRow: DatasheetRow = {
             ...target,
@@ -714,7 +706,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
           return next;
         });
 
-        if (applySuggestedOffers) {
+        if (applySuggestedOffers && itemId > 0) {
           // Evaluate active Trade Deals & Party Special Discounts only for newly added items (not when replacing Item Name to preserve Discount)
           const resCalc = await fetch('/api/enhancements/calculate-line', {
             method: 'POST',
@@ -798,23 +790,32 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
   // When Customer changes, refresh Customer-Wise Last Sale History metadata without modifying existing row prices/discounts
   const prevCustomerIdRef = useRef<number>(customerAccountId);
   useEffect(() => {
-    if (customerAccountId > 0 && prevCustomerIdRef.current !== customerAccountId) {
+    if (prevCustomerIdRef.current !== customerAccountId) {
       prevCustomerIdRef.current = customerAccountId;
       rows.forEach((r, idx) => {
-        if (r.item_id) {
-          fetchAndApplyItemHistory(idx, r.item_id, customerAccountId, invoiceType, false);
+        if (r.item_id || r.item_code) {
+          fetchAndApplyItemHistory(idx, Number(r.item_id || 0), customerAccountId, invoiceType, false, r.item_code);
         }
       });
     }
   }, [customerAccountId, rows, invoiceType, fetchAndApplyItemHistory]);
 
-  // Also ensure the currently selected row has its history metadata loaded (never altering row rates/discounts on click)
+  // Ensure the currently selected row always has its Item History loaded by ItemCode (even if customerAccountId is 0)
   useEffect(() => {
     const activeRow = rows[selectedRowIndex];
-    if (activeRow?.item_id && customerAccountId > 0) {
-      const cacheKey = `${activeRow.item_id}_${customerAccountId}`;
-      if (!itemHistoryMap[cacheKey]) {
-        fetchAndApplyItemHistory(selectedRowIndex, activeRow.item_id, customerAccountId, invoiceType, false);
+    if (activeRow && (activeRow.item_code || activeRow.item_id)) {
+      const codeKey = activeRow.item_code
+        ? `${activeRow.item_code.trim().toLowerCase()}_${customerAccountId || 0}`
+        : `${activeRow.item_id}_${customerAccountId || 0}`;
+      if (!itemHistoryMap[codeKey]) {
+        fetchAndApplyItemHistory(
+          selectedRowIndex,
+          Number(activeRow.item_id || 0),
+          customerAccountId,
+          invoiceType,
+          false,
+          activeRow.item_code
+        );
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1232,8 +1233,9 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     setEditingItemCode(null);
     setEditingItemName(null);
 
-    // Fetch Customer-Specific Last Sale Rate, Discount, Date, Invoice#, and Last Purchase Cost metadata
-    fetchAndApplyItemHistory(rowIdx, item.id, customerAccountId, invoiceType, !isReplacingItem);
+    // Immediately fetch and display Item History by unique ItemCode without requiring page refresh
+    setShowCompactHistoryPopup(true);
+    fetchAndApplyItemHistory(rowIdx, item.id, customerAccountId, invoiceType, !isReplacingItem, item.item_code);
 
     if (focusQuantityAfter) {
       const targetId =
@@ -2733,6 +2735,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
         setActiveSearchRowIdx(null);
         setEditingItemCode((prev) => (prev?.rowIdx === rowIndex ? null : prev));
         setEditingItemName((prev) => (prev?.rowIdx === rowIndex ? null : prev));
+        setShowCompactHistoryPopup(false);
         return;
       }
 
@@ -3045,10 +3048,16 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
     return dm.name.toLowerCase().includes(t) || dm.deliveryman_code.toLowerCase().includes(t);
   });
 
-  // Active row & its Customer-Wise Item History
+  // Active row & its ItemCode-based Item History
   const activeRow = rows[selectedRowIndex] || rows[0];
-  const activeHistoryKey = activeRow?.item_id ? `${activeRow.item_id}_${customerAccountId || 0}` : '';
-  const activeItemHistory = activeHistoryKey ? itemHistoryMap[activeHistoryKey] : null;
+  const activeCodeHistoryKey = activeRow?.item_code
+    ? `${activeRow.item_code.trim().toLowerCase()}_${customerAccountId || 0}`
+    : '';
+  const activeIdHistoryKey = activeRow?.item_id ? `${activeRow.item_id}_${customerAccountId || 0}` : '';
+  const activeItemHistory =
+    (activeCodeHistoryKey && itemHistoryMap[activeCodeHistoryKey]) ||
+    (activeIdHistoryKey && itemHistoryMap[activeIdHistoryKey]) ||
+    null;
 
   // POS Mode Helpers
   const handleQuickCash = (amt: number) => {
@@ -3784,6 +3793,17 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             onFocus={() => {
                               setSelectedRowIndex(rIdx);
                               setShowSearchDropdown(false);
+                              if (row.item_code || row.item_id) {
+                                setShowCompactHistoryPopup(true);
+                                fetchAndApplyItemHistory(
+                                  rIdx,
+                                  Number(row.item_id || 0),
+                                  customerAccountId,
+                                  invoiceType,
+                                  false,
+                                  row.item_code
+                                );
+                              }
                             }}
                             onDoubleClick={(e) => {
                               if (!row.item_id) return;
@@ -3829,6 +3849,7 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                                 setEditingItemName((prev) => (prev?.rowIdx === rIdx ? null : prev));
                                 setShowSearchDropdown(false);
                                 setActiveSearchRowIdx(null);
+                                setShowCompactHistoryPopup(false);
                                 return;
                               }
                               if (e.key === 'ArrowDown' && isDropdownActive && searchResults.length > 0) {
@@ -4079,6 +4100,26 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
               </div>
             </div>
           </div>
+
+          {/* Compact Item History Popup (POS View) */}
+          {showCompactHistoryPopup && activeRow && (activeRow.item_code || activeRow.item_id) && (
+            <CompactItemHistoryPopup
+              isOpen={showCompactHistoryPopup}
+              mode="sales"
+              itemCode={activeRow.item_code}
+              itemName={activeRow.item_name}
+              packing={activeRow.packing}
+              selectedCustomerId={customerAccountId || null}
+              selectedCustomerName={selectedCustomer?.account_name || 'Walk-in Cash Customer'}
+              historyData={activeItemHistory}
+              loading={historyLoading}
+              onClose={() => setShowCompactHistoryPopup(false)}
+              onApplySaleRate={(rate, discPct) => {
+                updateRowField(selectedRowIndex, 'unit_price', round2(rate));
+                updateRowField(selectedRowIndex, 'discount_percent', round2(discPct));
+              }}
+            />
+          )}
 
           {/* SECTION C (BOTTOM): COMPACT POS FOOTER */}
           <div className="ams-pos-compact-chrome w-full bg-slate-900 text-white rounded-md border border-slate-700 px-2.5 py-1.5 shrink-0 space-y-1">
@@ -5013,6 +5054,17 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                             onFocus={() => {
                               setSelectedRowIndex(rIdx);
                               setShowSearchDropdown(false);
+                              if (row.item_code || row.item_id) {
+                                setShowCompactHistoryPopup(true);
+                                fetchAndApplyItemHistory(
+                                  rIdx,
+                                  Number(row.item_id || 0),
+                                  customerAccountId,
+                                  invoiceType,
+                                  false,
+                                  row.item_code
+                                );
+                              }
                             }}
                             onDoubleClick={(e) => {
                               if (!row.item_id) return;
@@ -5356,10 +5408,10 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
                 {activeRow?.item_id && (
                   <button
                     type="button"
-                    onClick={() => setShowHistoryTable((v) => !v)}
+                    onClick={() => setShowCompactHistoryPopup((v) => !v)}
                     className="px-1.5 py-0 rounded-lg bg-white hover:bg-slate-50 border border-slate-400 text-slate-700 font-bold text-[9px] cursor-pointer"
                   >
-                    {showHistoryTable ? 'Hide History ▲' : 'History ▼'}
+                    {showCompactHistoryPopup ? 'Hide History ▲' : 'History ▼'}
                   </button>
                 )}
               </div>
@@ -5381,106 +5433,24 @@ export const SalesInvoiceDatasheet: React.FC<SalesInvoiceDatasheetProps> = ({
             </div>
           </div>
 
-          {/* Expandable History Table if toggled */}
-          {showHistoryTable && activeRow?.item_id && (
-            <div className="bg-slate-100 border-b border-slate-300 px-2 py-1 text-[10px] shrink-0">
-              <div className="flex items-center gap-1.5 mb-1">
-                <button
-                  type="button"
-                  onClick={() => setHistoryTab('customer_sales')}
-                  className={`px-2 py-0 rounded-lg text-[10px] font-bold cursor-pointer ${
-                    historyTab === 'customer_sales'
-                      ? 'bg-emerald-700 text-white'
-                      : 'bg-white text-slate-700 border border-slate-300'
-                  }`}
-                >
-                  Customer Sales ({activeItemHistory?.customerSalesHistory?.length || 0})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setHistoryTab('item_purchases')}
-                  className={`px-2 py-0 rounded-lg text-[10px] font-bold cursor-pointer ${
-                    historyTab === 'item_purchases'
-                      ? 'bg-sky-700 text-white'
-                      : 'bg-white text-slate-700 border border-slate-300'
-                  }`}
-                >
-                  Store Purchases ({activeItemHistory?.purchaseHistory?.length || 0})
-                </button>
-              </div>
-              <div className="max-h-20 overflow-y-auto border border-slate-300 rounded-lg bg-white">
-                {historyTab === 'customer_sales' ? (
-                  <table className="w-full text-left border-collapse text-[10px]">
-                    <thead className="bg-slate-100 text-slate-700 sticky top-0 border-b border-slate-200">
-                      <tr>
-                        <th className="px-2 py-0.5">Inv #</th>
-                        <th className="px-2 py-0.5">Date</th>
-                        <th className="px-2 py-0.5">Customer</th>
-                        <th className="px-2 py-0.5">Batch</th>
-                        <th className="px-2 py-0.5 text-right">Qty</th>
-                        <th className="px-2 py-0.5 text-right">Rate</th>
-                        <th className="px-2 py-0.5 text-right">Disc</th>
-                        <th className="px-2 py-0.5 text-right">Total</th>
-                        <th className="px-2 py-0.5 text-right">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {sortSalesHistoryRecentFirst(activeItemHistory?.customerSalesHistory).map((h, i) => (
-                        <tr key={h.sale_item_id || i} className="border-b border-slate-100 hover:bg-slate-50 font-mono">
-                          <td className="px-2 py-0.5 font-bold text-emerald-800">{h.invoice_number}</td>
-                          <td className="px-2 py-0.5">{h.invoice_date}</td>
-                          <td className="px-2 py-0.5 font-sans">{h.customer_name}</td>
-                          <td className="px-2 py-0.5">{h.batch_number}</td>
-                          <td className="px-2 py-0.5 text-right font-bold">{h.quantity}P</td>
-                          <td className="px-2 py-0.5 text-right font-bold">{formatPKR(h.unit_price)}</td>
-                          <td className="px-2 py-0.5 text-right text-rose-700">{Number(h.discount_percent || 0)}%</td>
-                          <td className="px-2 py-0.5 text-right font-bold">{formatPKR(h.line_total)}</td>
-                          <td className="px-2 py-0.5 text-right">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                updateRowField(selectedRowIndex, 'unit_price', round2(h.unit_price));
-                                updateRowField(selectedRowIndex, 'discount_percent', round2(h.discount_percent || 0));
-                              }}
-                              className="px-1.5 py-0 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold text-[9px] cursor-pointer"
-                            >
-                              Use
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                ) : (
-                  <table className="w-full text-left border-collapse text-[10px]">
-                    <thead className="bg-slate-100 text-slate-700 sticky top-0 border-b border-slate-200">
-                      <tr>
-                        <th className="px-2 py-0.5">Bill #</th>
-                        <th className="px-2 py-0.5">Date</th>
-                        <th className="px-2 py-0.5">Supplier</th>
-                        <th className="px-2 py-0.5">Batch</th>
-                        <th className="px-2 py-0.5 text-right">Qty</th>
-                        <th className="px-2 py-0.5 text-right">Pur. Cost</th>
-                        <th className="px-2 py-0.5 text-right">Retail MRP</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {sortPurchaseHistoryRecentFirst(activeItemHistory?.purchaseHistory).map((p, i) => (
-                        <tr key={p.purchase_item_id || i} className="border-b border-slate-100 hover:bg-slate-50 font-mono">
-                          <td className="px-2 py-0.5 font-bold text-sky-800">{p.bill_number}</td>
-                          <td className="px-2 py-0.5">{p.bill_date}</td>
-                          <td className="px-2 py-0.5 font-sans">{p.supplier_name}</td>
-                          <td className="px-2 py-0.5">{p.batch_number}</td>
-                          <td className="px-2 py-0.5 text-right font-bold">{p.quantity}P</td>
-                          <td className="px-2 py-0.5 text-right font-bold text-sky-900">{formatPKR(p.purchase_price)}</td>
-                          <td className="px-2 py-0.5 text-right">{formatPKR(p.retail_price)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-            </div>
+          {/* Compact Item History Popup (MS Access View) */}
+          {showCompactHistoryPopup && activeRow && (activeRow.item_code || activeRow.item_id) && (
+            <CompactItemHistoryPopup
+              isOpen={showCompactHistoryPopup}
+              mode="sales"
+              itemCode={activeRow.item_code}
+              itemName={activeRow.item_name}
+              packing={activeRow.packing}
+              selectedCustomerId={customerAccountId || null}
+              selectedCustomerName={selectedCustomer?.account_name || 'Walk-in Cash Customer'}
+              historyData={activeItemHistory}
+              loading={historyLoading}
+              onClose={() => setShowCompactHistoryPopup(false)}
+              onApplySaleRate={(rate, discPct) => {
+                updateRowField(selectedRowIndex, 'unit_price', round2(rate));
+                updateRowField(selectedRowIndex, 'discount_percent', round2(discPct));
+              }}
+            />
           )}
 
           {/* ================= SECTION C (BOTTOM): COMPACT MS ACCESS CALCULATION & ACTION FOOTER ================= */}

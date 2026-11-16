@@ -40,7 +40,7 @@ async function startServer() {
 
   const distPath = path.resolve(process.cwd(), 'dist');
   const distIndexHtml = path.resolve(distPath, 'index.html');
-  const serveStaticDist = process.env.NODE_ENV === 'production' || fs.existsSync(distIndexHtml);
+  const serveStaticDist = process.env.NODE_ENV === 'production' && fs.existsSync(distIndexHtml);
 
   console.log('----------------------------------------------------');
   console.log(' [AMS] Abrar Medical Store - System Initializing...');
@@ -390,29 +390,30 @@ self.addEventListener('fetch', (event) => {
     });
   }
 
-  // Hydrate from external Google Cloud Firestore BEFORE opening port or taking daily backup
-  try {
-    await initCloudPersistence();
-    const safetyReport = await runPreDeploymentSafetyChecks();
-    console.log(`[AMS Deployment Safety] ${safetyReport.message}`);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[AMS Cloud] Startup persistence check warning: ${msg}`);
-  }
-
   const server = app.listen(config.port, '0.0.0.0', () => {
     console.log(`[AMS Ready] Listening on http://0.0.0.0:${config.port}`);
 
-    startCloudPersistenceBackgroundLoop();
-
-    try {
-      const dailyBackup = ensureDailyAutomaticBackup();
-      if (dailyBackup) {
-        console.log(`[AMS Backup] Automatic daily backup created: ${dailyBackup.filename}`);
+    void (async () => {
+      try {
+        await initCloudPersistence();
+        const safetyReport = await runPreDeploymentSafetyChecks();
+        console.log(`[AMS Deployment Safety] ${safetyReport.message}`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[AMS Cloud] Startup persistence check warning: ${msg}`);
       }
-    } catch {
-      // ignore non-critical backup error on startup
-    }
+
+      startCloudPersistenceBackgroundLoop();
+
+      try {
+        const dailyBackup = ensureDailyAutomaticBackup();
+        if (dailyBackup) {
+          console.log(`[AMS Backup] Automatic daily backup created: ${dailyBackup.filename}`);
+        }
+      } catch {
+        // ignore non-critical backup error on startup
+      }
+    })();
 
     setInterval(() => {
       try {
